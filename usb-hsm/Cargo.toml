@@ -1,0 +1,156 @@
+[package]
+name = "usb-hsm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Test helpers expose internal state-manipulation APIs used by integration tests.
+# Never enable in production builds (cargo build / cargo build --release).
+# The .cargo/config.toml alias ensures `cargo test` enables this automatically.
+test-helpers = []
+
+[dependencies]
+# PKCS#11 C ABI types and constants
+cryptoki-sys = "0.5"
+
+# Crypto primitives -- wolfCrypt Rust wrapper.
+#
+# LOCAL PATH DEPENDENCY: wolfcrypt is not published to crates.io. This crate must
+# be checked out relative to usb-hsm as:
+#
+#   <parent>/
+#     usb-hsm/          <- this crate
+#     wolfssl-rs/
+#       wolfcrypt/      <- wolfcrypt crate root
+#
+# To build usb-hsm standalone, clone the wolfssl-rs workspace adjacent to this
+# directory. If wolfcrypt is later published to crates.io, replace the path
+# dependency with a versioned dep and remove this comment.
+# (Risk tracked: soft_PKCS11-z4e)
+wolfcrypt = { path = "../../wolfssl-rs/wolfcrypt", features = ["aead", "pbkdf2", "rsa", "ecdsa", "ecc", "mldsa", "mlkem", "cipher", "des3", "kdf", "rsa-direct"] }
+
+# AEAD traits (needed to call KeyInit/AeadInPlace on wolfcrypt types)
+aead = "0.5"
+generic-array = "0.14"
+
+# Block cipher traits (needed for AES-CBC and 3DES-CBC decryption in PBES2/PKCS#12 PBE)
+cipher = "0.4"
+
+# Signer / Verifier traits needed to call ML-DSA sign/verify via wolfcrypt
+signature = "2.2"
+
+# Key material safety
+zeroize = { version = "1.7", features = ["derive", "zeroize_derive"] }
+
+# Serialization for .p11k payload
+ciborium = "0.2"
+serde = { version = "1", features = ["derive"] }
+
+# USB / mount detection. The /proc/mounts retry loop (soft_PKCS11-5wc) uses
+# poll(2) on the udev socket rather than inotify -- no inotify dependency needed.
+udev = "0.9"
+
+# Concurrency
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+
+# Low-level
+libc = "0.2"
+
+# Logging facade -- never initialise a logger in library code; embedding apps call
+# log::set_logger. See https://docs.rs/log for a list of compatible backends.
+log = "0.4"
+
+# CLI argument parsing for usb-hsm-keygen
+clap = { version = "4", features = ["derive"] }
+
+# JSON parsing for GCP service-account key import (usb-hsm-keygen)
+serde_json = "1"
+
+# Hidden PIN prompt for usb-hsm-keygen (reads from /dev/tty when available,
+# falls back to stdin for non-interactive use).
+rpassword = "7"
+
+# PEM decoding for usb-hsm-keygen key import
+pem = "3"
+
+# SEC1 ECPrivateKey DER parsing for ec_scalar_from_sec1 / ec_public_key_id_from_sec1.
+# Replaces hand-rolled TLV walking for the RFC 5915 structure.
+sec1 = { version = "0.7", features = ["der"] }
+
+# PBES2 decryption for EncryptedPrivateKeyInfo (parse_encrypted_pkcs8).
+# Covers PBKDF2-SHA1/SHA256 + AES-128/256-CBC; replaces hand-rolled
+# pbes2_decrypt + pbkdf2_sha1.  Keygen-binary-only; no impact on .so FIPS posture.
+pkcs5 = { version = "0.7", features = ["pbes2", "sha1-insecure", "alloc"] }
+
+# bcrypt-PBKDF for OpenSSH new-format private key import (usb-hsm-keygen).
+# Only used in the key import path; no effect on signing/encryption operations.
+bcrypt-pbkdf = "0.2"
+
+# MD5 for JCEKS PBEWithMD5AndTripleDES key import (usb-hsm-keygen).
+# Only used in the JCEKS import path; no effect on signing/encryption operations.
+# wolfcrypt does not expose MD5 via the Rust wrapper layer.
+md5 = "0.7"
+
+# Base64 decoding for PPK (PuTTY) inline base64 blocks (usb-hsm-keygen).
+# Used only in the PPK import path; no effect on signing/encryption operations.
+base64 = "0.22"
+
+# Argon2 KDF for PPK v3 (PuTTY) key import (usb-hsm-keygen).
+# PPK v3 uses Argon2 instead of the SHA-1 KDF from v2.
+# wolfcrypt does not expose Argon2 via the Rust wrapper layer.
+# Used only in the PPK import path; no effect on signing/encryption operations.
+argon2 = "0.5"
+
+# Big-integer arithmetic for RSA CRT parameter derivation during OpenPGP import.
+# wolfcrypt does not expose modular inverse at the Rust API level.
+# Used only in the OpenPGP RSA import path; no effect on signing/encryption.
+num-bigint = { version = "0.4", features = ["std"] }
+
+# Integration tests that drive the C ABI through the function table require
+# test_mount / test_unmount / test_reset to simulate USB insertion/removal.
+# These tests are silently skipped if the test-helpers feature is not enabled.
+# Use `cargo t` (alias defined in .cargo/config.toml) or
+# `cargo test --features test-helpers` to run the full suite.
+[[bin]]
+name = "usb-hsm-keygen"
+path = "src/bin/usb-hsm-keygen/main.rs"
+
+[[bin]]
+name = "usb-hsm-info"
+path = "src/bin/usb-hsm-info.rs"
+
+[[test]]
+name = "integration"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "pkcs11_conformance"
+required-features = ["test-helpers"]
+
+# round_trip_create_load and key_bytes_zeroized_after_drop call Keystore::create
+# with 1 PBKDF2 iteration then Keystore::load. Without test-helpers,
+# MIN_KDF_ITERATIONS=100_000 causes load to reject the 1-iteration keystore.
+[[test]]
+name = "keystore_tests"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "keygen_tests"
+required-features = ["test-helpers"]
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+hex = "0.4"
+serde_json = "1"
+# PQC key generation for integration tests.
+wolfcrypt = { path = "../../wolfssl-rs/wolfcrypt", features = ["mldsa", "mlkem"] }
+signature = "2.2"
+
+[build-dependencies]
+pkg-config = "0.3"

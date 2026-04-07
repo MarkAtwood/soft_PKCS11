@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "soft_PKCS11",
+  "project_id": "11f85ae0-3ff4-49a9-b4c7-cb9070207743"
+}

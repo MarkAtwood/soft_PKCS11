@@ -1,0 +1,7 @@
+# Run all tests including integration tests that require the test-helpers feature.
+# Usage: cargo t
+# For production builds use plain `cargo build` -- the test-helpers feature is
+# never enabled by default, so test_mount/test_unmount/test_reset are absent
+# from the production .so.
+[alias]
+t = "test --features test-helpers"
