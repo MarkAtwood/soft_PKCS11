@@ -1203,8 +1203,19 @@ fn decrypt_openssh_blob(frame: &OpensshFrame, passphrase: &str) -> Result<Vec<u8
             }
             let salt_len =
                 u32::from_be_bytes([opts[0], opts[1], opts[2], opts[3]]) as usize;
-            let after_salt = 4 + salt_len;
-            if opts.len() < after_salt + 4 {
+            // OpenSSH always uses 16-byte bcrypt salts; cap generously at 64.
+            const MAX_OPENSSH_BCRYPT_SALT: usize = 64;
+            if salt_len > MAX_OPENSSH_BCRYPT_SALT {
+                return Err(malformed(&format!(
+                    "OpenSSH: bcrypt salt length {salt_len} exceeds maximum {MAX_OPENSSH_BCRYPT_SALT}"
+                )));
+            }
+            // Use checked arithmetic to avoid overflow on 32-bit targets.
+            let after_salt = 4usize.checked_add(salt_len)
+                .ok_or_else(|| malformed("OpenSSH: bcrypt kdfoptions salt length overflow"))?;
+            let end_of_rounds = after_salt.checked_add(4)
+                .ok_or_else(|| malformed("OpenSSH: bcrypt kdfoptions salt length overflow"))?;
+            if opts.len() < end_of_rounds {
                 return Err(malformed("OpenSSH: kdfoptions truncated before rounds field"));
             }
             let salt = &opts[4..after_salt];
@@ -1618,7 +1629,15 @@ pub fn parse_jks_structure(data: &[u8]) -> Result<JksKeystoreEntries, KeyParseEr
         match tag {
             1 => {
                 // PrivateKeyEntry: encrypted key blob + cert chain
+                // RSA-4096 PKCS#8 wrapped in JKS ≈ 2 KB; cap at 64 KB.
+                const MAX_JKS_KEY_BLOB: usize = 65_536;
                 let encrypted_key = cur.read_len32_bytes()?;
+                if encrypted_key.len() > MAX_JKS_KEY_BLOB {
+                    return Err(malformed(&format!(
+                        "JKS: encrypted key blob ({} bytes) exceeds maximum ({MAX_JKS_KEY_BLOB})",
+                        encrypted_key.len()
+                    )));
+                }
 
                 let cert_count = cur.read_u32()? as usize;
                 // Cap certificate chain length; a legitimate chain is 1-5 entries.
@@ -1627,10 +1646,18 @@ pub fn parse_jks_structure(data: &[u8]) -> Result<JksKeystoreEntries, KeyParseEr
                     return Err(malformed("JKS: certificate chain length exceeds maximum (100)"));
                 }
                 let mut cert_der = None;
+                // A DER-encoded certificate is typically 1-4 KB; cap at 64 KB.
+                const MAX_JKS_CERT_DER: usize = 65_536;
                 for cert_idx in 0..cert_count {
                     // cert type: u16-length UTF string (e.g. "X.509")
                     let _cert_type = cur.read_mutf8()?;
                     let cert_bytes = cur.read_len32_bytes()?;
+                    if cert_bytes.len() > MAX_JKS_CERT_DER {
+                        return Err(malformed(&format!(
+                            "JKS: certificate DER ({} bytes) exceeds maximum ({MAX_JKS_CERT_DER})",
+                            cert_bytes.len()
+                        )));
+                    }
                     if cert_idx == 0 {
                         cert_der = Some(cert_bytes);
                     }
@@ -2667,6 +2694,14 @@ pub fn parse_ppk(data: &[u8]) -> Result<PpkFile, KeyParseError> {
         } else if let Some(n_str) = ppk_strip_key(line, "Public-Lines") {
             let n: usize = n_str.trim().parse()
                 .map_err(|_| malformed("PPK: invalid Public-Lines count"))?;
+            // 4096 lines * 48 decoded bytes/line ≈ 192 KB — far more than any
+            // real RSA-4096 or ECDSA P-256 public key blob.
+            const MAX_PPK_BLOB_LINES: usize = 4_096;
+            if n > MAX_PPK_BLOB_LINES {
+                return Err(malformed(&format!(
+                    "PPK: Public-Lines count {n} exceeds maximum {MAX_PPK_BLOB_LINES}"
+                )));
+            }
             public_blob = Some(ppk_read_base64_lines(&mut lines, n)?);
         } else if let Some(val) = ppk_strip_key(line, "Key-Derivation") {
             kdf_variant = Some(val.trim().to_string());
@@ -2684,6 +2719,12 @@ pub fn parse_ppk(data: &[u8]) -> Result<PpkFile, KeyParseError> {
         } else if let Some(n_str) = ppk_strip_key(line, "Private-Lines") {
             let n: usize = n_str.trim().parse()
                 .map_err(|_| malformed("PPK: invalid Private-Lines count"))?;
+            const MAX_PPK_BLOB_LINES: usize = 4_096;
+            if n > MAX_PPK_BLOB_LINES {
+                return Err(malformed(&format!(
+                    "PPK: Private-Lines count {n} exceeds maximum {MAX_PPK_BLOB_LINES}"
+                )));
+            }
             private_blob = Some(ppk_read_base64_lines(&mut lines, n)?);
         } else if let Some(val) = ppk_strip_key(line, "Private-MAC") {
             private_mac = Some(ppk_decode_hex(val.trim())?);
