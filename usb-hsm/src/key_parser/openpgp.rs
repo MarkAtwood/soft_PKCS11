@@ -268,10 +268,11 @@ pub fn pgp_first_user_id_label(data: &[u8]) -> Option<String> {
         match next_pgp_packet(remaining) {
             Some((tag, body, rest)) => {
                 if tag == PGP_TAG_USER_ID {
-                    let uid = std::str::from_utf8(body).unwrap_or("").trim();
-                    if uid.is_empty() {
-                        return None;
-                    }
+                    let uid_str = match String::from_utf8(body.to_vec()) {
+                        Ok(s) if !s.trim().is_empty() => s,
+                        _ => { remaining = rest; continue; }
+                    };
+                    let uid = uid_str.trim();
                     // Strip "<email>" suffix when there is a non-empty name before it.
                     let label = if let Some(angle_pos) = uid.rfind('<') {
                         let name = uid[..angle_pos].trim();
@@ -682,14 +683,13 @@ pub fn pgp_decrypt_secret_material(
             let hash_id = cur[2];
             let mut cur = &cur[3..];
 
-            let key_len: usize = match cipher_id {
-                7 => 16, // AES-128
-                8 => 24, // AES-192
-                9 => 32, // AES-256
+            let (key_len, iv_len): (usize, usize) = match cipher_id {
+                7 => (16usize, 16usize),   // AES-128-CFB
+                8 => (24usize, 16usize),   // AES-192-CFB
+                9 => (32usize, 16usize),   // AES-256-CFB
                 other => {
                     return Err(KeyParseError::Unsupported(format!(
-                        "PGP secret key: cipher ID {other} is not supported \
-                         (expected 7=AES-128, 8=AES-192, or 9=AES-256)"
+                        "PGP: symmetric cipher ID {other} is not supported"
                     )));
                 }
             };
@@ -727,11 +727,11 @@ pub fn pgp_decrypt_secret_material(
                 }
             };
 
-            if cur.len() < 16 {
+            if cur.len() < iv_len {
                 return Err(super::malformed("PGP secret key: truncated IV"));
             }
-            let iv: [u8; 16] = cur[..16].try_into().unwrap();
-            cur = &cur[16..];
+            let iv: [u8; 16] = cur[..iv_len].try_into().unwrap();
+            cur = &cur[iv_len..];
 
             let key = pgp_s2k_derive_key(passphrase, s2k_type, hash_id, salt, count, key_len)?;
 
@@ -852,6 +852,14 @@ fn modinv_bytes(a: &[u8], m: &[u8]) -> Option<Vec<u8>> {
     let zero = BigInt::from(0i64);
     let one = BigInt::from(1i64);
 
+    // Reject zero modulus — division by zero in the Euclidean algorithm.
+    if m == zero {
+        return None;
+    }
+    if a == zero {
+        return None;
+    }
+
     // Iterative extended GCD: maintains old_r = gcd candidate, old_s = Bezout coefficient.
     let mut old_r = a;
     let mut r = m.clone();
@@ -943,6 +951,10 @@ fn parse_pgp_ecdsa_p256_secret_mpis(
             "PGP ECDSA P-256: scalar is {} bytes, expected <=32",
             scalar_raw.len()
         )));
+    }
+
+    if scalar_raw.iter().all(|&b| b == 0) {
+        return Err(super::malformed("PGP ECDSA P-256: zero scalar is not a valid private key"));
     }
 
     // Left-pad to exactly 32 bytes.

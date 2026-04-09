@@ -15,7 +15,8 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use cryptoki_sys::{
-    CK_ATTRIBUTE, CK_ATTRIBUTE_PTR, CK_BBOOL, CK_BYTE_PTR, CK_FLAGS, CK_FUNCTION_LIST,
+    CK_ATTRIBUTE, CK_ATTRIBUTE_PTR, CK_BBOOL, CK_BYTE_PTR, CK_C_INITIALIZE_ARGS,
+    CK_C_INITIALIZE_ARGS_PTR, CK_FLAGS, CK_FUNCTION_LIST,
     CK_INFO, CK_MECHANISM_INFO, CK_MECHANISM_PTR, CK_MECHANISM_TYPE,
     CK_NOTIFY, CK_OBJECT_CLASS, CK_OBJECT_HANDLE, CK_OBJECT_HANDLE_PTR, CK_RV,
     CK_RSA_PKCS_OAEP_PARAMS, CK_RSA_PKCS_PSS_PARAMS,
@@ -23,9 +24,9 @@ use cryptoki_sys::{
     CK_ULONG_PTR, CK_USER_TYPE, CK_UTF8CHAR_PTR, CK_VERSION, CK_VOID_PTR,
     CKA_CLASS, CKA_DECRYPT, CKA_ENCRYPT, CKA_ID, CKA_KEY_TYPE, CKA_LABEL, CKA_PRIVATE,
     CKA_SENSITIVE, CKA_SIGN, CKA_TOKEN, CKA_VERIFY,
-    CKF_DECRYPT, CKF_ENCRYPT, CKF_LOGIN_REQUIRED, CKF_REMOVABLE_DEVICE, CKF_RNG,
-    CKF_RW_SESSION, CKF_SERIAL_SESSION, CKF_SIGN, CKF_TOKEN_INITIALIZED, CKF_TOKEN_PRESENT,
-    CKF_USER_PIN_INITIALIZED, CKF_VERIFY, CKF_WRITE_PROTECTED,
+    CKF_DECRYPT, CKF_ENCRYPT, CKF_LOGIN_REQUIRED, CKF_OS_LOCKING_OK, CKF_REMOVABLE_DEVICE,
+    CKF_RNG, CKF_RW_SESSION, CKF_SERIAL_SESSION, CKF_SIGN, CKF_TOKEN_INITIALIZED,
+    CKF_TOKEN_PRESENT, CKF_USER_PIN_INITIALIZED, CKF_VERIFY, CKF_WRITE_PROTECTED,
     CKG_MGF1_SHA256,
     CKK_EC, CKK_ML_DSA, CKK_ML_KEM, CKK_RSA,
     CKM_EC_KEY_PAIR_GEN, CKM_RSA_PKCS_KEY_PAIR_GEN,
@@ -36,7 +37,7 @@ use cryptoki_sys::{
     CKA_CERTIFICATE_TYPE, CKA_VALUE,
     CKA_EC_PARAMS, CKA_EC_POINT, CKA_MODULUS, CKA_PUBLIC_EXPONENT,
     CKR_ARGUMENTS_BAD, CKR_ATTRIBUTE_TYPE_INVALID, CKR_BUFFER_TOO_SMALL,
-    CKR_CRYPTOKI_ALREADY_INITIALIZED, CKR_CRYPTOKI_NOT_INITIALIZED,
+    CKR_CANT_LOCK, CKR_CRYPTOKI_ALREADY_INITIALIZED, CKR_CRYPTOKI_NOT_INITIALIZED,
     CKR_DATA_LEN_RANGE,
     CKR_FUNCTION_NOT_SUPPORTED, CKR_GENERAL_ERROR,
     CKR_KEY_HANDLE_INVALID, CKR_KEY_TYPE_INCONSISTENT,
@@ -630,7 +631,35 @@ fn stop_usb_watcher() {
 // C_Initialize / C_Finalize / C_GetInfo
 // ---------------------------------------------------------------------------
 
-unsafe extern "C" fn c_initialize(_p_init_args: CK_VOID_PTR) -> CK_RV {
+unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
+    // Validate CK_C_INITIALIZE_ARGS before touching global state (PKCS#11 §11.4).
+    if !p_init_args.is_null() {
+        let args: &CK_C_INITIALIZE_ARGS = &*(p_init_args as CK_C_INITIALIZE_ARGS_PTR);
+        // pReserved must be NULL per spec; any other value is an error.
+        if !args.pReserved.is_null() {
+            return CKR_ARGUMENTS_BAD;
+        }
+        // Mutex callbacks must be either all-NULL or all-non-NULL.
+        let cb_null = [
+            args.CreateMutex.is_none(),
+            args.DestroyMutex.is_none(),
+            args.LockMutex.is_none(),
+            args.UnlockMutex.is_none(),
+        ];
+        let all_null = cb_null.iter().all(|&n| n);
+        let all_set = cb_null.iter().all(|&n| !n);
+        if !all_null && !all_set {
+            return CKR_ARGUMENTS_BAD;
+        }
+        // This library always uses OS-level locking (parking_lot). If the caller
+        // supplies custom mutex functions without also setting CKF_OS_LOCKING_OK,
+        // we cannot honour the contract and must reject.
+        if all_set && (args.flags & CKF_OS_LOCKING_OK == 0) {
+            return CKR_CANT_LOCK;
+        }
+        // If CKF_OS_LOCKING_OK is set (with or without callbacks), or if no
+        // callbacks are supplied, our internal OS locking satisfies the contract.
+    }
     if INITIALIZED.swap(true, Ordering::SeqCst) {
         return CKR_CRYPTOKI_ALREADY_INITIALIZED;
     }

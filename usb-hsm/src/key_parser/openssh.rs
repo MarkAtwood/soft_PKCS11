@@ -262,6 +262,9 @@ fn extract_openssh_ec_p256(cur: &mut &[u8], _id: [u8; 16]) -> Result<ParsedKey, 
             "OpenSSH EC P-256: private scalar must be 32 bytes after stripping MPI zero prefix",
         ));
     }
+    if scalar_bytes.iter().all(|&b| b == 0) {
+        return Err(super::malformed("OpenSSH EC P-256: private scalar is zero"));
+    }
 
     let comment = super::read_openssh_str(cur).unwrap_or_default();
     let label_hint = if comment.is_empty() { None } else { Some(comment) };

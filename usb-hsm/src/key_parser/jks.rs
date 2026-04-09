@@ -77,9 +77,13 @@ impl<'a> JksCursor<'a> {
         mutf8_to_string(raw)
     }
 
-    /// Read a u32-length-prefixed blob.
-    fn read_len32_bytes(&mut self) -> Result<Vec<u8>, KeyParseError> {
+    /// Read a u32-length-prefixed blob, rejecting lengths above `max` before
+    /// allocating.
+    fn read_len32_bounded(&mut self, max: usize) -> Result<Vec<u8>, KeyParseError> {
         let len = self.read_u32()? as usize;
+        if len > max {
+            return Err(super::malformed(&format!("JKS: field length {len} exceeds maximum {max}")));
+        }
         Ok(self.read_bytes(len)?.to_vec())
     }
 }
@@ -147,6 +151,8 @@ pub fn parse_jks_structure(data: &[u8]) -> Result<JksKeystoreEntries, KeyParseEr
     if entry_count > 10_000 {
         return Err(super::malformed("JKS: entry count exceeds maximum (10000)"));
     }
+    // Sealed object (JCEKS SecretKeyEntry) is at most a few KB in practice; cap at 64 KB.
+    const MAX_JCEKS_SECRET_BLOB: usize = 65_536;
     let mut private_key_entries = Vec::new();
 
     for _ in 0..entry_count {
@@ -159,13 +165,7 @@ pub fn parse_jks_structure(data: &[u8]) -> Result<JksKeystoreEntries, KeyParseEr
                 // PrivateKeyEntry: encrypted key blob + cert chain
                 // RSA-4096 PKCS#8 wrapped in JKS ≈ 2 KB; cap at 64 KB.
                 const MAX_JKS_KEY_BLOB: usize = 65_536;
-                let encrypted_key = cur.read_len32_bytes()?;
-                if encrypted_key.len() > MAX_JKS_KEY_BLOB {
-                    return Err(super::malformed(&format!(
-                        "JKS: encrypted key blob ({} bytes) exceeds maximum ({MAX_JKS_KEY_BLOB})",
-                        encrypted_key.len()
-                    )));
-                }
+                let encrypted_key = cur.read_len32_bounded(MAX_JKS_KEY_BLOB)?;
 
                 let cert_count = cur.read_u32()? as usize;
                 // Cap certificate chain length; a legitimate chain is 1-5 entries.
@@ -179,13 +179,7 @@ pub fn parse_jks_structure(data: &[u8]) -> Result<JksKeystoreEntries, KeyParseEr
                 for cert_idx in 0..cert_count {
                     // cert type: u16-length UTF string (e.g. "X.509")
                     let _cert_type = cur.read_mutf8()?;
-                    let cert_bytes = cur.read_len32_bytes()?;
-                    if cert_bytes.len() > MAX_JKS_CERT_DER {
-                        return Err(super::malformed(&format!(
-                            "JKS: certificate DER ({} bytes) exceeds maximum ({MAX_JKS_CERT_DER})",
-                            cert_bytes.len()
-                        )));
-                    }
+                    let cert_bytes = cur.read_len32_bounded(MAX_JKS_CERT_DER)?;
                     if cert_idx == 0 {
                         cert_der = Some(cert_bytes);
                     }
@@ -200,20 +194,16 @@ pub fn parse_jks_structure(data: &[u8]) -> Result<JksKeystoreEntries, KeyParseEr
             }
             2 => {
                 // TrustedCertEntry: cert type + DER; no private key -- skip
+                const MAX_JKS_CERT_DER: usize = 65_536;
                 let _cert_type = cur.read_mutf8()?;
-                let _cert_bytes = cur.read_len32_bytes()?;
+                let _cert_bytes = cur.read_len32_bounded(MAX_JKS_CERT_DER)?;
             }
             3 if is_jceks => {
                 // SecretKeyEntry (JCEKS only): sealed object wrapping a symmetric key.
                 // Symmetric keys cannot be imported as PKCS#11 private key entries.
-                // Consume the blob to keep the parse cursor valid, then return
-                // Unsupported so the caller knows the alias was not a private key.
-                // (soft_PKCS11-10qe)
-                let _sealed = cur.read_len32_bytes()?;
-                return Err(KeyParseError::Unsupported(format!(
-                    "JKS: alias \"{alias}\" is a JCEKS SecretKeyEntry (symmetric key); \
-                     only PrivateKeyEntry (tag 1) entries can be imported"
-                )));
+                // Consume the blob to keep the parse cursor valid, then skip.
+                let _sealed = cur.read_len32_bounded(MAX_JCEKS_SECRET_BLOB)?;
+                continue;
             }
             _ => {
                 return Err(super::malformed(&format!(
@@ -258,7 +248,7 @@ pub fn verify_jks_integrity(data: &[u8], passphrase: &str) -> Result<(), KeyPars
     wolfcrypt::digest::digest_trait::Update::update(&mut sha, body);
 
     let computed = sha.finalize();
-    if computed.as_slice() != stored_hash {
+    if !super::ct_eq(computed.as_slice(), stored_hash) {
         return Err(super::malformed(
             "JKS: integrity check failed (wrong passphrase or corrupted keystore)",
         ));
@@ -335,7 +325,7 @@ pub(crate) fn decrypt_jks_private_key_entry(
             }
         }
         let computed = jks_sha1_block(passphrase, &plaintext);
-        if check != computed.as_ref() {
+        if !super::ct_eq(check, computed.as_ref()) {
             return Err(super::malformed(
                 "JKS PrivateKeyEntry: wrong passphrase or corrupted key",
             ));

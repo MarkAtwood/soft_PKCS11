@@ -50,7 +50,10 @@ fn parse_bag_attributes(set_body: &[u8]) -> (Option<Vec<u8>>, Option<String>) {
         };
         if oid == OID_PKCS9_LOCAL_KEY_ID {
             if let Some((_, val, _)) = super::tlv(value_set, 0x04) {
-                local_key_id = Some(val.to_vec());
+                let id_bytes = val.to_vec();
+                if !id_bytes.is_empty() {
+                    local_key_id = Some(id_bytes);
+                }
             }
         } else if oid == OID_PKCS9_FRIENDLY_NAME {
             if let Some((_, val, _)) = super::tlv(value_set, 0x1e) {
@@ -354,6 +357,9 @@ pub fn verify_pfx_mac(der: &[u8], passphrase: &str) -> Result<(), KeyParseError>
     // macSalt OCTET STRING
     let (_, mac_salt, mac_data_rest2) = super::tlv(mac_data_rest, 0x04)
         .ok_or_else(|| super::malformed("PFX: macData macSalt missing"))?;
+    if mac_salt.is_empty() {
+        return Err(super::malformed("PFX: macData macSalt must not be empty"));
+    }
 
     // iterations INTEGER (DEFAULT 1)
     // Cap to prevent a crafted PFX from triggering a multi-hour KDF hang; absent
@@ -387,7 +393,7 @@ pub fn verify_pfx_mac(der: &[u8], passphrase: &str) -> Result<(), KeyParseError>
     let primary_pass = super::passphrase_to_utf16be(passphrase);
 
     let computed = compute_pfx_mac(&primary_pass, mac_salt, iterations, hash_type, mac_key_len, mac_input)?;
-    if computed == mac_value {
+    if super::ct_eq(&computed, mac_value) {
         return Ok(());
     }
 
@@ -395,15 +401,13 @@ pub fn verify_pfx_mac(der: &[u8], passphrase: &str) -> Result<(), KeyParseError>
     // (RFC 7292 s.B.3 alternative interpretation) instead of [0x00, 0x00].
     if passphrase.is_empty() {
         if let Ok(computed2) = compute_pfx_mac(&[], mac_salt, iterations, hash_type, mac_key_len, mac_input) {
-            if computed2 == mac_value {
+            if super::ct_eq(&computed2, mac_value) {
                 return Ok(());
             }
         }
     }
 
-    Err(super::malformed(
-        "PFX: MAC verification failed (wrong passphrase or corrupted file)",
-    ))
+    Err(super::malformed("PFX: MAC verification failed (wrong passphrase?)"))
 }
 
 /// Parse a PKCS#12 PFX DER blob and return the categorised bags.
@@ -478,7 +482,9 @@ fn key_id_from_local_key_id(local_key_id: &[u8]) -> [u8; 16] {
 
 /// Find the first cert DER whose `localKeyID` matches `key_local_id`.
 ///
-/// Falls back to the first cert in the list if no match is found.
+/// If the key has a `localKeyID`, only a cert with a matching `localKeyID` is
+/// returned; an unmatched ID yields `None` rather than an unrelated cert.
+/// If the key has no `localKeyID`, falls back to the first cert in the list.
 fn find_cert_for_key(
     certs: &[(Option<Vec<u8>>, Vec<u8>)],
     key_local_id: &Option<Vec<u8>>,
@@ -489,8 +495,10 @@ fn find_cert_for_key(
                 return Some(cert_der.clone());
             }
         }
+        None
+    } else {
+        certs.first().map(|(_, d)| d.clone())
     }
-    certs.first().map(|(_, d)| d.clone())
 }
 
 /// Decrypt all `ShroudedKeyBag` entries in `bags` and return the extracted keys.

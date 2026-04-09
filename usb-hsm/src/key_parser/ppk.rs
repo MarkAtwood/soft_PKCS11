@@ -173,6 +173,9 @@ pub(crate) fn ppk_extract_ec_p256(
             "PPK EC P-256: private scalar must be 32 bytes after stripping MPI zero prefix",
         ));
     }
+    if scalar.iter().all(|&b| b == 0) {
+        return Err(super::malformed("PPK EC P-256: private scalar is zero"));
+    }
 
     // Key ID: SHA-256(65-byte uncompressed public point)[0..16]
     use wolfcrypt::digest::digest_trait::Digest as _;
@@ -267,6 +270,9 @@ pub fn parse_ppk(data: &[u8]) -> Result<PpkFile, KeyParseError> {
         if let Some(val) = ppk_strip_key(line, "Encryption") {
             encryption = Some(val.to_string());
         } else if let Some(val) = ppk_strip_key(line, "Comment") {
+            if val.len() > 4096 {
+                return Err(super::malformed("PPK: Comment field too long"));
+            }
             comment = Some(val.to_string());
         } else if let Some(n_str) = ppk_strip_key(line, "Public-Lines") {
             let n: usize = n_str.trim().parse()
@@ -363,6 +369,9 @@ where
         let line = lines.next().ok_or_else(|| {
             super::malformed(&format!("PPK: unexpected end of file reading base64 line {i}"))
         })?;
+        if line.len() > 128 {
+            return Err(super::malformed("PPK: base64 line exceeds maximum length"));
+        }
         b64.push_str(line.trim());
     }
     use base64::Engine as _;
@@ -573,7 +582,7 @@ pub fn ppk_v3_verify_mac(
     );
     let computed = super::hmac_sha256(&mac_key, &mac_input);
 
-    if ppk.private_mac.as_slice() != computed {
+    if !super::ct_eq(ppk.private_mac.as_slice(), &computed) {
         return Err(super::malformed(
             "PPK v3: MAC verification failed (wrong passphrase or corrupted file)",
         ));
@@ -659,7 +668,7 @@ pub fn ppk_v2_verify_mac(ppk: &PpkFile, passphrase: &str, private_blob_decrypted
         private_blob_decrypted,
     );
     let computed = super::hmac_sha1(&mac_key, &mac_input);
-    if ppk.private_mac.as_slice() != computed {
+    if !super::ct_eq(ppk.private_mac.as_slice(), &computed) {
         return Err(super::malformed(
             "PPK: MAC verification failed (wrong passphrase or corrupted file)",
         ));

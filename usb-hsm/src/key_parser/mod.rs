@@ -669,6 +669,20 @@ fn malformed(msg: &str) -> KeyParseError {
     KeyParseError::Malformed(msg.to_string())
 }
 
+/// Constant-time byte-slice equality.  Returns true iff `a == b` with no
+/// early exit on the first differing byte, preventing timing side-channels
+/// in MAC/hash comparisons.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Capture the raw bytes of one DER TLV (tag + length + value) from `data`.
 ///
 /// Returns `(tlv_bytes, remaining)` where `tlv_bytes` includes the tag and
@@ -904,11 +918,16 @@ fn jce_pbe_md5_3des_decrypt(
 
     // Split salt into two 4-byte halves; apply buggy inversion if equal.
     let mut half0: [u8; 4] = salt_bytes[..4].try_into().expect("len checked above");
-    let half1: [u8; 4] = salt_bytes[4..].try_into().expect("len checked above");
-    if half0 == half1 {
-        // OpenJDK PBECipherCore bug: `[a,b,c,d] -> [d,a,b,d]`
-        // s[2]=s[1]; s[1]=s[0]; s[0]=s[3] (s[3] stays)
+    let mut half1: [u8; 4] = salt_bytes[4..].try_into().expect("len checked above");
+    // OpenJDK PBECipherCore: apply per-half inversion when a half consists of
+    // two repeated 2-byte pairs — [A,B,A,B] → [B,A,B,A] is the internal
+    // repetition check; the transformation is [a,b,c,d] → [d,a,b,d].
+    // Applied independently to each half; half1 requires `mut` too.
+    if half0[0] == half0[2] && half0[1] == half0[3] {
         half0 = [half0[3], half0[0], half0[1], half0[3]];
+    }
+    if half1[0] == half1[2] && half1[1] == half1[3] {
+        half1 = [half1[3], half1[0], half1[1], half1[3]];
     }
 
     // Derive 32 bytes: iterate MD5(prev || password) for each half.
@@ -976,6 +995,10 @@ fn passphrase_to_utf16be(s: &str) -> Vec<u8> {
 /// negative integers, integers larger than 8 significant bytes, or missing data.
 fn parse_der_uint(data: &[u8]) -> Option<(u64, &[u8])> {
     let (_, int_bytes, rest) = tlv(data, 0x02)?;
+    // Reject negative integers (high bit set with no leading 0x00).
+    if int_bytes.first().map(|b| b & 0x80 != 0).unwrap_or(false) {
+        return None;
+    }
     let bytes = if int_bytes.first() == Some(&0x00) { &int_bytes[1..] } else { int_bytes };
     if bytes.len() > 8 {
         return None;
