@@ -7,12 +7,7 @@
 use std::path::Path;
 use std::process;
 
-// Wire-format constants (must be kept in sync with keystore.rs).
-const MAGIC: &[u8; 4] = b"P11K";
-const HEADER_LEN: usize = 57;
-const OFF_VERSION: usize = 4;
-const OFF_KDF_ITERATIONS: usize = 37;
-const OFF_CIPHERTEXT_LEN: usize = 53;
+use usb_hsm::keystore::{HEADER_LEN, MAGIC, OFF_CIPHERTEXT_LEN, OFF_KDF_ITERATIONS, OFF_VERSION};
 
 fn inspect(path: &Path) -> Result<(), String> {
     let data = std::fs::read(path)

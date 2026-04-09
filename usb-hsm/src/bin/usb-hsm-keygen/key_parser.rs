@@ -542,6 +542,14 @@ fn parse_der_auto(der: &[u8], id: [u8; 16]) -> Result<ParsedKey, KeyParseError> 
 // DER TLV helpers
 // ---------------------------------------------------------------------------
 
+/// Maximum byte count accepted for any single DER value field.
+///
+/// A DER object larger than 64 MiB is almost certainly not a private key.
+/// This cap is checked in [`tlv`] and [`next_tlv`] after decoding the length
+/// field. It prevents degenerate inputs from producing very large slices that
+/// callers might then `.to_vec()` into a heap allocation. (soft_PKCS11-idn5)
+const MAX_REASONABLE_DER_LEN: usize = 64 * 1024 * 1024;
+
 /// Parse one DER TLV from the front of `data`.
 ///
 /// Returns `(tag, value, remaining)` where `value` is the content octets and
@@ -560,14 +568,19 @@ fn tlv(data: &[u8], expected_tag: u8) -> Option<(u8, &[u8], &[u8])> {
     } else if b1 == 0x82 {
         (((*data.get(2)? as usize) << 8) | (*data.get(3)? as usize), 4)
     } else {
-        // DER allows lengths up to 2^(8*126)-1 via long-form encoding, but RSA and
-        // EC private keys never exceed a few kilobytes.  A 2-byte length field
-        // (0x82, max 65535 bytes) covers any key size this tool will encounter.
-        // Silently rejecting larger lengths is intentional: if a caller passes a
-        // file with a 3-byte or 4-byte DER length, it is almost certainly not a
-        // private key -- treat it as malformed rather than attempting to parse it.
+        // 0x80 = DER indefinite-length form (BER only, forbidden in DER) --
+        // rejected here. DER allows lengths up to 2^(8*126)-1 via long-form
+        // encoding, but RSA and EC private keys never exceed a few kilobytes.
+        // A 2-byte length field (0x82, max 65535 bytes) covers any key size
+        // this tool will encounter. Silently rejecting larger lengths is
+        // intentional: if a caller passes a file with a 3-byte or 4-byte DER
+        // length, it is almost certainly not a private key -- treat it as
+        // malformed rather than attempting to parse it.
         return None;
     };
+    if len > MAX_REASONABLE_DER_LEN {
+        return None;
+    }
     let value = data.get(hdr..hdr + len)?;
     let rest = data.get(hdr + len..)?;
     Some((tag, value, rest))
@@ -631,6 +644,16 @@ fn encode_der_len(buf: &mut Vec<u8>, len: usize) {
         buf.push(0x81);
         buf.push(len as u8);
     } else {
+        // 0x82 encodes a two-byte length field (max 65535).  If `len` were
+        // larger the emitted bytes would be silently truncated and the resulting
+        // DER would be structurally corrupt.  This never happens in practice
+        // because all callers operate on small key blobs, but the assertion
+        // catches a new caller that passes an unexpectedly large value during
+        // development. (soft_PKCS11-idn5)
+        debug_assert!(
+            len <= 0xffff,
+            "encode_der_len: len={len} exceeds 0x82 two-byte DER maximum (65535)"
+        );
         buf.push(0x82);
         buf.push((len >> 8) as u8);
         buf.push(len as u8);
@@ -655,10 +678,18 @@ fn next_tlv(data: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     } else if b1 == 0x82 {
         (((*data.get(2)? as usize) << 8) | (*data.get(3)? as usize), 4)
     } else {
+        // 0x80 = indefinite-length (BER only, forbidden in DER) -- rejected.
+        // Higher long-form lengths (0x83+) are also rejected; see comment in tlv().
         return None;
     };
+    if len > MAX_REASONABLE_DER_LEN {
+        return None;
+    }
     let value = data.get(hdr..hdr + len)?;
-    Some((tag, value, &data[hdr + len..]))
+    // Use .get() for the remainder too (consistent with tlv(); avoids a bare
+    // index that would be safe but panic-prone if the len check above moves).
+    let rest = data.get(hdr + len..)?;
+    Some((tag, value, rest))
 }
 
 /// Build an RSAPublicKey (PKCS#1 s.3.1) DER from an RSAPrivateKey (PKCS#1 s.3.2) DER.
@@ -830,10 +861,15 @@ fn pkcs12_pbe_sha1_3des_decrypt(
         .ok_or_else(|| malformed("PKCS12-3DES: PBEParameter SEQUENCE missing"))?;
     let (_, salt, iters_rest) = tlv(params, 0x04)
         .ok_or_else(|| malformed("PKCS12-3DES: salt OCTET STRING missing"))?;
+    if salt.is_empty() {
+        return Err(malformed("PKCS12-3DES: salt must not be empty"));
+    }
     let (iters, _) = parse_der_uint(iters_rest)
         .ok_or_else(|| malformed("PKCS12-3DES: iterationCount missing or invalid"))?;
-    if iters == 0 || iters > i32::MAX as u64 {
-        return Err(malformed("PKCS12-3DES: iterationCount out of range"));
+    // Cap iteration count to prevent a crafted file from triggering a multi-hour
+    // KDF hang. 10,000,000 matches the cap in the JCEKS PBE path. (soft_PKCS11-9r05)
+    if iters == 0 || iters > 10_000_000 {
+        return Err(malformed("PKCS12-3DES: iterationCount out of range (must be 1..=10_000_000)"));
     }
 
     // PKCS#12 passwords are encoded as null-terminated UTF-16 big-endian (RFC 7292 s.B.1).
@@ -1166,6 +1202,17 @@ fn decrypt_openssh_blob(frame: &OpensshFrame, passphrase: &str) -> Result<Vec<u8
                 opts[after_salt + 2],
                 opts[after_salt + 3],
             ]);
+            // Cap round count to prevent a crafted key file from causing a
+            // multi-hour bcrypt_pbkdf computation. OpenSSH defaults to 16;
+            // 1,024 provides generous headroom for high-security keys.
+            // (soft_PKCS11-e9qp)
+            const MAX_OPENSSH_BCRYPT_ROUNDS: u32 = 1_024;
+            if rounds == 0 || rounds > MAX_OPENSSH_BCRYPT_ROUNDS {
+                return Err(malformed(&format!(
+                    "OpenSSH: bcrypt rounds {rounds} out of range \
+                     (must be 1..={MAX_OPENSSH_BCRYPT_ROUNDS})"
+                )));
+            }
 
             // bcrypt_pbkdf: derive 32-byte AES key + 16-byte CTR IV.
             let mut key_iv = [0u8; 48];
@@ -1238,6 +1285,26 @@ fn strip_ssh_mpi_zero(mpi: &[u8]) -> &[u8] {
     }
 }
 
+/// Validate the padding sequence at the end of a decrypted OpenSSH private blob.
+///
+/// Per the OpenSSH format spec, after all key fields are consumed the remaining
+/// bytes must be the incrementing sequence 0x01, 0x02, 0x03, ... (mod 256).
+/// This padding fills the private blob to the cipher block boundary and its
+/// correctness is evidence that the check-word pair was not a false positive.
+/// An empty remainder (perfectly block-aligned content) is also accepted.
+/// (soft_PKCS11-e9qp)
+fn validate_openssh_padding(padding: &[u8]) -> Result<(), KeyParseError> {
+    for (i, &b) in padding.iter().enumerate() {
+        if b != ((i + 1) as u8) {
+            return Err(malformed(
+                "OpenSSH: private blob has invalid padding after key fields \
+                 (corrupted key or wrong passphrase)",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Parse key data from a decrypted OpenSSH private blob (bytes after the two
 /// check words).
 ///
@@ -1246,14 +1313,16 @@ fn strip_ssh_mpi_zero(mpi: &[u8]) -> &[u8] {
 fn parse_openssh_key_data(blob: &[u8], id: [u8; 16]) -> Result<ParsedKey, KeyParseError> {
     let mut cur = blob;
     let keytype = read_openssh_str(&mut cur)?;
-    match keytype.as_str() {
+    let key = match keytype.as_str() {
         "ecdsa-sha2-nistp256" => extract_openssh_ec_p256(&mut cur, id),
         "ssh-rsa" => extract_openssh_rsa(&mut cur, id),
         other => Err(KeyParseError::Unsupported(format!(
             "OpenSSH key type '{other}' is not supported; \
              convert with: ssh-keygen -p -N '' -m PKCS8 -f <keyfile>"
         ))),
-    }
+    }?;
+    validate_openssh_padding(cur)?;
+    Ok(key)
 }
 
 /// Extract an ECDSA P-256 private key from SSH wire-format blob data.
@@ -1521,6 +1590,12 @@ pub fn parse_jks_structure(data: &[u8]) -> Result<JksKeystoreEntries, KeyParseEr
     }
 
     let entry_count = cur.read_u32()? as usize;
+    // Cap to prevent a crafted file from causing an extremely long parse loop.
+    // 10,000 is far more entries than any legitimate keystore would hold.
+    // (soft_PKCS11-10qe)
+    if entry_count > 10_000 {
+        return Err(malformed("JKS: entry count exceeds maximum (10000)"));
+    }
     let mut private_key_entries = Vec::new();
 
     for _ in 0..entry_count {
@@ -1534,6 +1609,11 @@ pub fn parse_jks_structure(data: &[u8]) -> Result<JksKeystoreEntries, KeyParseEr
                 let encrypted_key = cur.read_len32_bytes()?;
 
                 let cert_count = cur.read_u32()? as usize;
+                // Cap certificate chain length; a legitimate chain is 1-5 entries.
+                // (soft_PKCS11-10qe)
+                if cert_count > 100 {
+                    return Err(malformed("JKS: certificate chain length exceeds maximum (100)"));
+                }
                 let mut cert_der = None;
                 for cert_idx in 0..cert_count {
                     // cert type: u16-length UTF string (e.g. "X.509")
@@ -1557,8 +1637,16 @@ pub fn parse_jks_structure(data: &[u8]) -> Result<JksKeystoreEntries, KeyParseEr
                 let _cert_bytes = cur.read_len32_bytes()?;
             }
             3 if is_jceks => {
-                // SecretKeyEntry (JCEKS only): sealed object -- skip
+                // SecretKeyEntry (JCEKS only): sealed object wrapping a symmetric key.
+                // Symmetric keys cannot be imported as PKCS#11 private key entries.
+                // Consume the blob to keep the parse cursor valid, then return
+                // Unsupported so the caller knows the alias was not a private key.
+                // (soft_PKCS11-10qe)
                 let _sealed = cur.read_len32_bytes()?;
+                return Err(KeyParseError::Unsupported(format!(
+                    "JKS: alias \"{alias}\" is a JCEKS SecretKeyEntry (symmetric key); \
+                     only PrivateKeyEntry (tag 1) entries can be imported"
+                )));
             }
             _ => {
                 return Err(malformed(&format!(
@@ -1733,7 +1821,15 @@ fn parse_bag_attributes(set_body: &[u8]) -> (Option<Vec<u8>>, Option<String>) {
     let mut local_key_id = None;
     let mut friendly_name = None;
     let mut cur = set_body;
+    let mut attr_count = 0usize;
     while !cur.is_empty() {
+        // Cap attribute count to bound iteration over a crafted PKCS#12 file.
+        // A legitimate bagAttributes SET holds at most 2–3 attributes.
+        // (soft_PKCS11-la8f)
+        attr_count += 1;
+        if attr_count > 100 {
+            break;
+        }
         // Each PKCS12Attribute is a SEQUENCE { OID, SET OF value }.
         let (tag, attr_seq_body, rest) = match next_tlv(cur) {
             Some(x) => x,
@@ -1774,7 +1870,16 @@ fn parse_safe_contents(der: &[u8], bags: &mut PfxBags) -> Result<(), KeyParseErr
         .ok_or_else(|| malformed("PFX SafeContents: expected SEQUENCE"))?;
 
     let mut cur = seq_body;
+    let mut bag_count = 0usize;
     while !cur.is_empty() {
+        // Cap SafeBag count to bound memory use from a crafted PKCS#12 file.
+        // Each bag_value is .to_vec()-allocated; unbounded growth would allow
+        // OOM via many bags. 1,000 bags is far beyond any legitimate keystore.
+        // (soft_PKCS11-la8f)
+        bag_count += 1;
+        if bag_count > 1_000 {
+            return Err(malformed("PFX SafeContents: SafeBag count exceeds maximum (1000)"));
+        }
         let (tag, safe_bag_body, rest) = next_tlv(cur)
             .ok_or_else(|| malformed("PFX SafeContents: truncated SafeBag"))?;
         cur = rest;
@@ -1919,7 +2024,14 @@ fn parse_authenticated_safe(
         .ok_or_else(|| malformed("PFX AuthenticatedSafe: expected SEQUENCE"))?;
 
     let mut cur = seq_body;
+    let mut ci_count = 0usize;
     while !cur.is_empty() {
+        // Cap ContentInfo count; a legitimate PKCS#12 has 1–3 ContentInfos.
+        // (soft_PKCS11-la8f)
+        ci_count += 1;
+        if ci_count > 100 {
+            return Err(malformed("PFX AuthenticatedSafe: ContentInfo count exceeds maximum (100)"));
+        }
         let (tag, ci_body, rest) = next_tlv(cur)
             .ok_or_else(|| malformed("PFX AuthenticatedSafe: truncated ContentInfo"))?;
         cur = rest;
@@ -2065,9 +2177,18 @@ pub fn verify_pfx_mac(der: &[u8], passphrase: &str) -> Result<(), KeyParseError>
         .ok_or_else(|| malformed("PFX: macData macSalt missing"))?;
 
     // iterations INTEGER (DEFAULT 1)
-    let iterations = parse_der_uint(mac_data_rest2)
-        .map(|(v, _)| v as i32)
-        .unwrap_or(1);
+    // Cap to prevent a crafted PFX from triggering a multi-hour KDF hang; absent
+    // field defaults to 1 per RFC 7292. The v as i32 cast is safe because
+    // v <= 10_000_000 < i32::MAX. (soft_PKCS11-9r05)
+    let iterations = match parse_der_uint(mac_data_rest2).map(|(v, _)| v) {
+        None => 1i32,
+        Some(v) if v == 0 || v > 10_000_000 => {
+            return Err(malformed(
+                "PFX: macData iterationCount out of range (must be 1..=10_000_000)",
+            ));
+        }
+        Some(v) => v as i32,
+    };
 
     // Determine hash algorithm and MAC key output size.
     let (mac_key_len, hash_type) = if hash_oid == OID_SHA1 {
@@ -2729,6 +2850,23 @@ fn ppk_v3_derive_key_iv_mac(
     let salt = ppk.argon2_salt.as_deref()
         .ok_or_else(|| malformed("PPK v3: missing Argon2-Salt"))?;
 
+    // Cap Argon2 parameters before calling the crate to prevent a crafted PPK
+    // file from triggering an OOM allocation (m) or unbounded CPU stall (t, p).
+    // Caps match PuTTY's own defaults (256 MiB / 13 passes / 1 thread) with
+    // comfortable headroom for strong configurations. (soft_PKCS11-snkm)
+    const MAX_ARGON2_M: u32 = 1_048_576; // 1 GiB in KiB
+    const MAX_ARGON2_T: u32 = 2_048;
+    const MAX_ARGON2_P: u32 = 64;
+    if m > MAX_ARGON2_M {
+        return Err(malformed(&format!("PPK v3: Argon2-Memory {m} KiB exceeds maximum {MAX_ARGON2_M} KiB")));
+    }
+    if t > MAX_ARGON2_T {
+        return Err(malformed(&format!("PPK v3: Argon2-Passes {t} exceeds maximum {MAX_ARGON2_T}")));
+    }
+    if p > MAX_ARGON2_P {
+        return Err(malformed(&format!("PPK v3: Argon2-Parallelism {p} exceeds maximum {MAX_ARGON2_P}")));
+    }
+
     let params = argon2::Params::new(m, t, p, None)
         .map_err(|e| malformed(&format!("PPK v3: invalid Argon2 parameters: {e}")))?;
     let kdf = argon2::Argon2::new(variant, argon2::Version::V0x13, params);
@@ -3127,6 +3265,13 @@ fn parse_old_format_length(data: &[u8], length_type: u8) -> Option<(usize, usize
 /// Packets of other types are skipped.  Iteration stops at the first
 /// malformed or truncated packet.  Each returned tuple is `(tag, body)` where
 /// `tag` is [`PGP_TAG_SECRET_KEY`] or [`PGP_TAG_SECRET_SUBKEY`].
+/// Maximum number of secret-key packets (tag 5 or 7) collected from a single
+/// OpenPGP keyring. A key with more than 100 secret-key packets is implausible
+/// for any legitimate use case; without a cap a crafted input could force
+/// unbounded memory allocation via many small body.to_vec() clones.
+/// (soft_PKCS11-qv6u)
+const MAX_PGP_SECRET_PACKETS: usize = 100;
+
 pub fn pgp_collect_secret_packets(data: &[u8]) -> Vec<(u8, Vec<u8>)> {
     let mut result = Vec::new();
     let mut remaining = data;
@@ -3135,6 +3280,9 @@ pub fn pgp_collect_secret_packets(data: &[u8]) -> Vec<(u8, Vec<u8>)> {
             Some((tag, body, rest)) => {
                 if tag == PGP_TAG_SECRET_KEY || tag == PGP_TAG_SECRET_SUBKEY {
                     result.push((tag, body.to_vec()));
+                    if result.len() >= MAX_PGP_SECRET_PACKETS {
+                        break;
+                    }
                 }
                 remaining = rest;
             }
@@ -3597,6 +3745,11 @@ pub fn pgp_decrypt_secret_material(
                     }
                     let s = &cur[..8];
                     let c = cur[8];
+                    // RFC 4880 s.3.7.1.3: count = (16 + (c & 15)) << ((c >> 4) + 6).
+                    // Maximum is 31 << 21 = 65,011,712 (≈65M hash-update bytes, ~1s on
+                    // modern hardware). GnuPG routinely generates keys near this maximum,
+                    // so no application-level cap is applied; the arithmetic is already
+                    // bounded by the u8 range of `c`. (soft_PKCS11-qv6u)
                     let count =
                         (16usize + (c & 15) as usize) << ((c >> 4) as usize + 6);
                     cur = &cur[9..];

@@ -5,12 +5,7 @@ mod pin;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use usb_hsm::keystore::{KeyEntry, Keystore};
-
-// PBKDF2 iteration count for new keystores (NIST SP 800-132 floor).
-// Identical to the private MIN_KDF_ITERATIONS in keystore.rs -- kept in sync
-// manually since that constant is not part of the public API.
-const KDF_ITERATIONS: u32 = 100_000;
+use usb_hsm::keystore::{KeyEntry, Keystore, DEFAULT_KDF_ITERATIONS as KDF_ITERATIONS};
 
 #[derive(Parser)]
 #[command(
@@ -155,6 +150,20 @@ fn run(cmd: Commands) -> Result<(), String> {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+/// Unix permission mode for .p11k keystore files.
+///
+/// Restricted to owner read/write only (0o600). The file contains
+/// AES-256-GCM encrypted private key material; world-readable permissions
+/// would allow any local user to copy the ciphertext and attempt offline
+/// PIN brute-force. (soft_PKCS11-vtll)
+const MODE_KEYSTORE: u32 = 0o600;
+
+/// Unix permission mode for the .usb-hsm manifest file.
+///
+/// The manifest lists .p11k filenames and slot labels; it contains no
+/// key material and may be readable by other users in shared setups.
+const MODE_MANIFEST: u32 = 0o644;
+
 /// Write `data` to `path` atomically: write to a temp file in the same
 /// directory, then rename into place.
 ///
@@ -173,11 +182,33 @@ fn run(cmd: Commands) -> Result<(), String> {
 /// Mitigation: usb-hsm-keygen is a single-user CLI tool.  Do not run two
 /// instances against the same keystore file concurrently.  A wrapper script
 /// that uses `flock(1)` provides mutual exclusion if scripted automation requires it.
-fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
+fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let tmp = dir.join(format!(".usb-hsm-keygen-{}.tmp", std::process::id()));
-    std::fs::write(&tmp, data)
-        .map_err(|e| format!("write to {}: {e}", tmp.display()))?;
+
+    // Write through OpenOptions so the temp file is created with the correct
+    // permissions before rename(2) makes it visible at the final path.
+    // fs::write creates files at 0o666&~umask (typically 0o644 = world-readable)
+    // and there is no portable way to atomically fix permissions on the final
+    // path after rename. Setting mode on the temp file is correct: rename(2)
+    // preserves the temp file's permissions, so the destination atomically
+    // appears with the right mode. (soft_PKCS11-vtll)
+    {
+        use std::io::Write as _;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(mode);
+        }
+        let mut f = opts
+            .open(&tmp)
+            .map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        f.write_all(data)
+            .map_err(|e| format!("write to {}: {e}", tmp.display()))?;
+    }
+
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("rename to {}: {e}", path.display())
@@ -283,7 +314,7 @@ fn cmd_create(
     let pin = pin::prompt_new_pin().map_err(|e| format!("PIN prompt failed: {e}"))?;
     let blob = Keystore::create(entries, &pin, KDF_ITERATIONS)
         .map_err(|e| format!("keystore creation failed: {e}"))?;
-    atomic_write(&output, &blob)?;
+    atomic_write(&output, &blob, MODE_KEYSTORE)?;
     eprintln!("Wrote {} key(s) to {}:", summary.len(), output.display());
     for (i, (label, key_type, id_hex)) in summary.iter().enumerate() {
         eprintln!("  [{}] {} ({}) id={}", i, label, key_type, id_hex);
@@ -299,7 +330,7 @@ fn cmd_create(
             .join(usb_hsm::manifest::DEFAULT_MANIFEST_NAME);
         let existing = std::fs::read_to_string(&manifest_path).unwrap_or_default();
         let updated = usb_hsm::manifest::upsert_entry(&existing, filename, &entry_label);
-        atomic_write(&manifest_path, updated.as_bytes())?;
+        atomic_write(&manifest_path, updated.as_bytes(), MODE_MANIFEST)?;
         eprintln!("Updated manifest {}.", manifest_path.display());
     }
 
@@ -348,7 +379,7 @@ fn cmd_key_add(keystore_path: PathBuf, key_file: PathBuf, label: Option<String>)
 
     let blob = Keystore::create(entries, &pin, KDF_ITERATIONS)
         .map_err(|e| format!("keystore re-encryption failed: {e}"))?;
-    atomic_write(&keystore_path, &blob)?;
+    atomic_write(&keystore_path, &blob, MODE_KEYSTORE)?;
     eprintln!("Added key to {}.", keystore_path.display());
     if had_failures {
         return Err("some keys failed to import; see warnings above".to_string());
@@ -394,7 +425,7 @@ fn cmd_key_remove(keystore_path: PathBuf, label: Option<String>, id: Option<Stri
 
     let blob = Keystore::create(entries, &pin, KDF_ITERATIONS)
         .map_err(|e| format!("keystore re-encryption failed: {e}"))?;
-    atomic_write(&keystore_path, &blob)?;
+    atomic_write(&keystore_path, &blob, MODE_KEYSTORE)?;
     eprintln!("Removed key from {}.", keystore_path.display());
     Ok(())
 }
@@ -436,7 +467,7 @@ fn cmd_cert_add(
 
     let blob = Keystore::create(entries, &pin, KDF_ITERATIONS)
         .map_err(|e| format!("keystore re-encryption failed: {e}"))?;
-    atomic_write(&keystore_path, &blob)?;
+    atomic_write(&keystore_path, &blob, MODE_KEYSTORE)?;
     eprintln!("Attached certificate to entry \"{label}\" in {}.", keystore_path.display());
     Ok(())
 }
@@ -458,7 +489,7 @@ fn cmd_manifest_add(p11k_path: PathBuf, label: Option<String>) -> Result<(), Str
         .join(usb_hsm::manifest::DEFAULT_MANIFEST_NAME);
     let existing = std::fs::read_to_string(&manifest_path).unwrap_or_default();
     let updated = usb_hsm::manifest::upsert_entry(&existing, &filename, &entry_label);
-    atomic_write(&manifest_path, updated.as_bytes())?;
+    atomic_write(&manifest_path, updated.as_bytes(), MODE_MANIFEST)?;
     eprintln!(
         "Added '{}' (label: \"{}\") to manifest {}.",
         filename, entry_label, manifest_path.display()
@@ -490,7 +521,7 @@ fn cmd_manifest_remove(p11k_path: PathBuf) -> Result<(), String> {
             filename, manifest_path.display()
         ));
     }
-    atomic_write(&manifest_path, updated.as_bytes())?;
+    atomic_write(&manifest_path, updated.as_bytes(), MODE_MANIFEST)?;
     eprintln!("Removed '{}' from manifest {}.", filename, manifest_path.display());
     Ok(())
 }
@@ -511,7 +542,7 @@ fn cmd_pin_change(keystore_path: PathBuf) -> Result<(), String> {
     let entries: Vec<KeyEntry> = keystore.entries().iter().map(|e| e.clone()).collect();
     let blob = Keystore::create(entries, &new_pin, KDF_ITERATIONS)
         .map_err(|e| format!("keystore re-encryption failed: {e}"))?;
-    atomic_write(&keystore_path, &blob)?;
+    atomic_write(&keystore_path, &blob, MODE_KEYSTORE)?;
     eprintln!("PIN changed for {}.", keystore_path.display());
     Ok(())
 }

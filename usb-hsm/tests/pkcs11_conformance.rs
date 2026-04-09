@@ -17,7 +17,7 @@ use cryptoki_sys::{
     CKG_MGF1_SHA256,
     CKK_EC, CKK_RSA,
     CKM_AES_CBC, CKM_ECDSA, CKM_ECDSA_SHA256,
-    CKM_HASH_ML_DSA, CKM_ML_DSA, CKM_ML_KEM,
+    CKM_ML_DSA, CKM_ML_KEM,
     CKM_RSA_PKCS, CKM_RSA_PKCS_OAEP, CKM_RSA_PKCS_PSS,
     CKM_SHA_1, CKM_SHA256,
     CKR_CRYPTOKI_ALREADY_INITIALIZED, CKR_FUNCTION_NOT_SUPPORTED, CKR_KEY_TYPE_INCONSISTENT,
@@ -182,7 +182,7 @@ fn c_get_mechanism_list_expected() {
         let mut count: CK_ULONG = 0;
         let rv = fl.C_GetMechanismList.unwrap()(0, std::ptr::null_mut(), &mut count);
         assert_eq!(rv, CKR_OK, "C_GetMechanismList count");
-        assert_eq!(count, 7, "expected 7 mechanisms");
+        assert_eq!(count, 6, "expected 6 mechanisms");
 
         let mut mechs = vec![0u64; count as usize];
         let rv = fl.C_GetMechanismList.unwrap()(0, mechs.as_mut_ptr(), &mut count);
@@ -194,7 +194,6 @@ fn c_get_mechanism_list_expected() {
             CKM_ECDSA,
             CKM_ECDSA_SHA256,
             CKM_ML_DSA,
-            CKM_HASH_ML_DSA,
             CKM_ML_KEM,
         ];
         for &exp in expected {
@@ -206,7 +205,7 @@ fn c_get_mechanism_list_expected() {
         assert!(!mechs.contains(&CKM_RSA_PKCS), "CKM_RSA_PKCS must not be advertised");
 
         // Verify sign-capable mechanisms report CKF_SIGN.
-        for &mech in &[CKM_RSA_PKCS_PSS, CKM_ECDSA, CKM_ECDSA_SHA256, CKM_ML_DSA, CKM_HASH_ML_DSA] {
+        for &mech in &[CKM_RSA_PKCS_PSS, CKM_ECDSA, CKM_ECDSA_SHA256, CKM_ML_DSA] {
             let mut info: CK_MECHANISM_INFO = std::mem::zeroed();
             let rv = fl.C_GetMechanismInfo.unwrap()(0, mech, &mut info);
             assert_eq!(rv, CKR_OK, "C_GetMechanismInfo({mech:#x})");

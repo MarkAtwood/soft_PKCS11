@@ -26,6 +26,15 @@ use crate::keystore::{KeyEntry, KeyType};
 /// early to surface the caller error as CKR_DATA_LEN_RANGE.
 const P256_HASH_LEN: usize = 32;
 
+/// Byte length of a P-256 field element (group order = 256 bits = 32 bytes).
+///
+/// Used to split a raw r||s ECDSA signature into its two components.
+/// Coincidentally equal to `P256_HASH_LEN` (SHA-256 also produces 32 bytes),
+/// but the two constants serve different purposes: `P256_HASH_LEN` guards
+/// the pre-hash input length; `P256_FIELD_LEN` indexes into the signature
+/// byte array. (soft_PKCS11-5l26)
+const P256_FIELD_LEN: usize = 32;
+
 /// Fixed raw r||s signature length for P-256 per PKCS#11 s.2.3.1.
 ///
 /// PKCS#11 s.2.3.1: "For the ECDSA mechanism ... the signature is the
@@ -218,7 +227,7 @@ pub fn verify(
                     signature.len()
                 )));
             }
-            let sig_der = rs_to_der(&signature[..P256_HASH_LEN], &signature[P256_HASH_LEN..])?;
+            let sig_der = rs_to_der(&signature[..P256_FIELD_LEN], &signature[P256_FIELD_LEN..])?;
             let key = P256SigningKey::from_private_key_bytes(&key_entry.der_bytes)
                 .map_err(|e| OpsError::Crypto(format!("{e:?}")))?;
             let pub_key = key.verifying_key()
@@ -239,7 +248,7 @@ pub fn verify(
                     signature.len()
                 )));
             }
-            let sig_der = rs_to_der(&signature[..P256_HASH_LEN], &signature[P256_HASH_LEN..])?;
+            let sig_der = rs_to_der(&signature[..P256_FIELD_LEN], &signature[P256_FIELD_LEN..])?;
             let hash = P256::hash_message(data)
                 .map_err(|e| OpsError::Crypto(format!("{e:?}")))?;
             let key = P256SigningKey::from_private_key_bytes(&key_entry.der_bytes)

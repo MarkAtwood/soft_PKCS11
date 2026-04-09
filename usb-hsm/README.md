@@ -36,8 +36,7 @@ and all key material is immediately zeroized.
 | `CKM_RSA_PKCS_OAEP` | | | y | y |
 | `CKM_ECDSA` (pre-hashed) | y | y | | |
 | `CKM_ECDSA_SHA256` | y | y | | |
-| `CKM_ML_DSA` (pre-hashed) | y | y | | |
-| `CKM_HASH_ML_DSA` | y | y | | |
+| `CKM_ML_DSA` (pure ML-DSA.Sign, §5.3) | y | y | | |
 | `CKM_ML_KEM` | | | y | y |
 
 RSA keys: PKCS#1 DER format. EC keys: P-256, raw 32-byte private scalar.
@@ -305,7 +304,7 @@ mlock + zeroize           UsbEvent channel
 
 ## Post-quantum cryptography
 
-ML-DSA-65 (`CKM_ML_DSA`, `CKM_HASH_ML_DSA`) and ML-KEM-768 (`CKM_ML_KEM`)
+ML-DSA-65 (`CKM_ML_DSA`, FIPS 204 §5.3 ML-DSA.Sign) and ML-KEM-768 (`CKM_ML_KEM`)
 are supported. The `KeyType` enum and `.p11k` format also accommodate all three
 ML-DSA levels (44, 65, 87) and all three ML-KEM levels (512, 768, 1024)
 without a format version bump.

@@ -28,7 +28,7 @@ use cryptoki_sys::{
     CKG_MGF1_SHA256,
     CKK_EC, CKK_ML_DSA, CKK_ML_KEM, CKK_RSA,
     CKM_EC_KEY_PAIR_GEN, CKM_RSA_PKCS_KEY_PAIR_GEN,
-    CKM_ECDSA, CKM_ECDSA_SHA256, CKM_HASH_ML_DSA, CKM_ML_DSA, CKM_ML_KEM,
+    CKM_ECDSA, CKM_ECDSA_SHA256, CKM_ML_DSA, CKM_ML_KEM,
     CKM_RSA_PKCS_OAEP, CKM_RSA_PKCS_PSS,
     CKM_SHA256,
     CKC_X_509, CKO_CERTIFICATE, CKO_PRIVATE_KEY, CKO_PUBLIC_KEY,
@@ -321,7 +321,14 @@ const MECHANISMS: &[CK_MECHANISM_TYPE] = &[
     CKM_ECDSA,
     CKM_ECDSA_SHA256,
     CKM_ML_DSA,
-    CKM_HASH_ML_DSA,
+    // CKM_HASH_ML_DSA (FIPS 204 §5.4 HashML-DSA.Sign) is intentionally absent.
+    // The wolfcrypt high-level Rust API (`MlDsa65SigningKey`) only exposes
+    // `wc_dilithium_sign_msg` (ML-DSA.Sign, FIPS 204 §5.3 -- message hashed
+    // internally with SHAKE256). The HashML-DSA variant (`sign_ctx_hash` /
+    // `wc_dilithium_sign_ctx_hash`) exists in wolfcrypt-wrapper but is not
+    // exposed in the type-safe `wolfcrypt` crate. Advertising a mechanism that
+    // returns CKR_MECHANISM_INVALID is a direct PKCS#11 conformance violation.
+    // Track re-adding this in a future wolfssl-rs update (soft_PKCS11-alk6).
     CKM_ML_KEM,
 ];
 
@@ -331,7 +338,7 @@ const MECHANISMS: &[CK_MECHANISM_TYPE] = &[
 // sign with OAEP or ML_KEM is always CKR_MECHANISM_INVALID per spec.
 // CKM_RSA_PKCS is absent for the same reason described above MECHANISMS.
 const SIGN_VERIFY_MECHANISMS: &[CK_MECHANISM_TYPE] =
-    &[CKM_RSA_PKCS_PSS, CKM_ECDSA, CKM_ECDSA_SHA256, CKM_ML_DSA, CKM_HASH_ML_DSA];
+    &[CKM_RSA_PKCS_PSS, CKM_ECDSA, CKM_ECDSA_SHA256, CKM_ML_DSA];
 
 fn mechanism_info(mech: CK_MECHANISM_TYPE) -> Option<CK_MECHANISM_INFO> {
     match mech {
@@ -350,7 +357,7 @@ fn mechanism_info(mech: CK_MECHANISM_TYPE) -> Option<CK_MECHANISM_INFO> {
             ulMaxKeySize: 521,
             flags: CKF_SIGN | CKF_VERIFY,
         }),
-        CKM_ML_DSA | CKM_HASH_ML_DSA => Some(CK_MECHANISM_INFO {
+        CKM_ML_DSA => Some(CK_MECHANISM_INFO {
             ulMinKeySize: 44,
             ulMaxKeySize: 87,
             flags: CKF_SIGN | CKF_VERIFY,
@@ -423,7 +430,7 @@ fn sign_max_output(mechanism: CK_MECHANISM_TYPE) -> CK_ULONG {
         CKM_ECDSA | CKM_ECDSA_SHA256 => 64,
         // ML-DSA-65 (FIPS 204): fixed 3309-byte signature.
         // required_key_type constrains CKM_ML_DSA to MlDsa65 so 3309 is exact.
-        CKM_ML_DSA | CKM_HASH_ML_DSA => 3309,
+        CKM_ML_DSA => 3309,
         // Fallback: 512 bytes covers RSA-4096, the largest key type this library
         // supports. New mechanisms with signatures larger than 512 bytes MUST add
         // an explicit arm above -- the fallback silently over-allocates for small
@@ -468,7 +475,17 @@ fn find_p11k_from_manifest(mount_point: &std::path::Path, manifest_name: &str) -
     let manifest_path = mount_point.join(manifest_name);
     let content = match std::fs::read_to_string(&manifest_path) {
         Ok(s) => s,
-        Err(_) => return Vec::new(), // manifest absent -> not a token drive
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            // The file exists but could not be read (permissions, I/O error, etc.).
+            // Log a warning so the user knows why the drive was silently ignored.
+            // (soft_PKCS11-zrxe)
+            log::warn!(
+                "usb-hsm: could not read manifest at {}: {e}; ignoring drive",
+                manifest_path.display()
+            );
+            return Vec::new();
+        }
     };
     let entries = crate::manifest::parse_manifest(&content);
     if entries.is_empty() {
@@ -480,10 +497,15 @@ fn find_p11k_from_manifest(mount_point: &std::path::Path, manifest_name: &str) -
     }
     let mut result = Vec::new();
     for entry in &entries {
-        // Reject filenames with path separators to prevent escaping the mount root.
-        if entry.filename.contains('/') || entry.filename.contains('\\') {
+        // Accept only a plain filename with no path components. Checking
+        // Path::file_name() == Some(filename) rejects "..", ".", and any
+        // name containing "/" or "\\" in a single idiomatic test. The
+        // previous check for '/' and '\\' did not catch "..". (soft_PKCS11-o7ph)
+        if std::path::Path::new(&entry.filename).file_name()
+            != Some(std::ffi::OsStr::new(&entry.filename))
+        {
             log::warn!(
-                "usb-hsm: manifest entry '{}' contains a path separator; skipping",
+                "usb-hsm: manifest entry '{}' is not a plain filename; skipping",
                 entry.filename
             );
             continue;
@@ -1748,7 +1770,7 @@ fn required_key_type(mech: CK_MECHANISM_TYPE) -> Option<KeyType> {
     match mech {
         CKM_RSA_PKCS_PSS | CKM_RSA_PKCS_OAEP => Some(KeyType::Rsa),
         CKM_ECDSA | CKM_ECDSA_SHA256 => Some(KeyType::Ec),
-        CKM_ML_DSA | CKM_HASH_ML_DSA => Some(KeyType::MlDsa65),
+        CKM_ML_DSA => Some(KeyType::MlDsa65),
         CKM_ML_KEM => Some(KeyType::MlKem768),
         // Unknown mechanism: no key-type constraint. This branch is unreachable
         // in practice because init_op checks allowed_mechs before calling this.

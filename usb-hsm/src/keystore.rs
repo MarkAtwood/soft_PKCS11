@@ -15,11 +15,12 @@ use std::path::Path;
 use aead::{AeadInPlace, KeyInit};
 use generic_array::GenericArray;
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use wolfcrypt::Aes256Gcm;
 
-// Wire format constants
-const MAGIC: &[u8; 4] = b"P11K";
+// Wire format constants — exported so usb-hsm-info can read the unencrypted
+// header without duplicating offsets that must stay in sync. (soft_PKCS11-dq7h)
+pub const MAGIC: &[u8; 4] = b"P11K";
 
 // KDF iteration floor.
 //
@@ -44,8 +45,16 @@ compile_error!(
      Only enable test-helpers via `cargo test` or `cargo t`."
 );
 
+/// PBKDF2-HMAC-SHA256 iteration count used when creating a new keystore.
+///
+/// Matches the NIST SP 800-132 minimum recommendation and the floor enforced
+/// by [`Keystore::load`] (`MIN_KDF_ITERATIONS`). Export this constant so that
+/// the `usb-hsm-keygen` binary can use the same value without duplicating it.
+/// (soft_PKCS11-bv7u)
+pub const DEFAULT_KDF_ITERATIONS: u32 = 100_000;
+
 #[cfg(not(feature = "test-helpers"))]
-const MIN_KDF_ITERATIONS: u32 = 100_000;
+const MIN_KDF_ITERATIONS: u32 = DEFAULT_KDF_ITERATIONS;
 #[cfg(feature = "test-helpers")]
 const MIN_KDF_ITERATIONS: u32 = 1;
 const VERSION: u8 = 0x01;
@@ -62,13 +71,13 @@ const AES_KEY_LEN: usize = 32;
 //   [41..53] aes_gcm_nonce   (12 bytes)
 //   [53..57] ciphertext_len  (u32 BE)
 //   [57..]   ciphertext, then 16-byte tag
-const OFF_VERSION: usize = 4;
+pub const OFF_VERSION: usize = 4;
 const OFF_KDF_SALT: usize = 5;
-const OFF_KDF_ITERATIONS: usize = 37;
+pub const OFF_KDF_ITERATIONS: usize = 37;
 const OFF_AES_NONCE: usize = 41;
-const OFF_CIPHERTEXT_LEN: usize = 53;
+pub const OFF_CIPHERTEXT_LEN: usize = 53;
 const OFF_CIPHERTEXT: usize = 57;
-const HEADER_LEN: usize = OFF_CIPHERTEXT; // 57 bytes before ciphertext
+pub const HEADER_LEN: usize = OFF_CIPHERTEXT; // 57 bytes before ciphertext
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Zeroize)]
 pub enum KeyType {
@@ -524,10 +533,16 @@ fn load_p11k(data: &[u8], pin: &[u8]) -> Result<Keystore, KeystoreError> {
     let nonce_ga = GenericArray::from_slice(aes_gcm_nonce);
     let tag_ga = GenericArray::from_slice(tag_bytes);
 
-    let mut plaintext = data[OFF_CIPHERTEXT..ciphertext_end].to_vec();
+    // Zeroizing<Vec<u8>> ensures the decrypted plaintext is wiped on ALL exit
+    // paths, including the CborDecode error path where the ? operator returns
+    // early before the explicit plaintext.zeroize() call below.
+    // Previously a plain Vec<u8> would drop without zeroing if ciborium returned
+    // Err (e.g. loading a future-format keystore that passes GCM auth but has
+    // different CBOR). (soft_PKCS11-ptnt)
+    let mut plaintext = Zeroizing::new(data[OFF_CIPHERTEXT..ciphertext_end].to_vec());
 
     let decrypt_result =
-        cipher.decrypt_in_place_detached(nonce_ga, b"", &mut plaintext, tag_ga);
+        cipher.decrypt_in_place_detached(nonce_ga, b"", &mut *plaintext, tag_ga);
 
     // Zeroize key immediately regardless of outcome
     aes_key.zeroize();
@@ -551,7 +566,9 @@ fn load_p11k(data: &[u8], pin: &[u8]) -> Result<Keystore, KeystoreError> {
     let mut entries: Vec<KeyEntry> =
         ciborium::from_reader(&plaintext[..]).map_err(|e| KeystoreError::CborDecode(e.to_string()))?;
 
-    // Zeroize plaintext after decode
+    // Explicit zeroize before entries are constructed from the plaintext.
+    // Zeroizing<Vec<u8>> would also zeroize on drop, but zeroing here
+    // minimizes the window during which plaintext and entries coexist in RAM.
     plaintext.zeroize();
 
     // --- Validate key sizes and formats ---
