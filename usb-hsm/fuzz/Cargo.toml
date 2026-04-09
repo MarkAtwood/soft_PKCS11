@@ -1,0 +1,70 @@
+[package]
+name = "usb-hsm-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.usb-hsm]
+path = ".."
+
+# Full format dispatcher — exercises all parsers via a single entry point.
+[[bin]]
+name = "fuzz_parse_key_bytes"
+path = "fuzz_targets/fuzz_parse_key_bytes.rs"
+test = false
+doc = false
+bench = false
+
+# OpenSSH new-format binary frame parser.
+[[bin]]
+name = "fuzz_parse_openssh"
+path = "fuzz_targets/fuzz_parse_openssh.rs"
+test = false
+doc = false
+bench = false
+
+# PKCS#12 PFX parser (MAC verification + DER structure + SafeContents).
+[[bin]]
+name = "fuzz_parse_pkcs12"
+path = "fuzz_targets/fuzz_parse_pkcs12.rs"
+test = false
+doc = false
+bench = false
+
+# OpenPGP packet parser (binary + ASCII-armored).
+[[bin]]
+name = "fuzz_parse_openpgp"
+path = "fuzz_targets/fuzz_parse_openpgp.rs"
+test = false
+doc = false
+bench = false
+
+# PuTTY PPK v2/v3 parser.
+[[bin]]
+name = "fuzz_parse_ppk"
+path = "fuzz_targets/fuzz_parse_ppk.rs"
+test = false
+doc = false
+bench = false
+
+# JKS/JCEKS keystore parser.
+[[bin]]
+name = "fuzz_parse_jks"
+path = "fuzz_targets/fuzz_parse_jks.rs"
+test = false
+doc = false
+bench = false
+
+# PBES2/PBES1 encrypted PKCS#8 parser.
+[[bin]]
+name = "fuzz_parse_encrypted_pkcs8"
+path = "fuzz_targets/fuzz_parse_encrypted_pkcs8.rs"
+test = false
+doc = false
+bench = false

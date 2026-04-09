@@ -2,6 +2,7 @@
 ///
 /// C_GetFunctionList is the sole entry point needed by p11-kit and pkcs11-tool.
 /// All other functions are reached through the CK_FUNCTION_LIST it returns.
+pub mod key_parser;
 pub mod keystore;
 pub mod manifest;
 pub mod ops;

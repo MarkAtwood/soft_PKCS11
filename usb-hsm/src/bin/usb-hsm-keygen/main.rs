@@ -1,6 +1,7 @@
 /// usb-hsm-keygen: manage keys in a usb-hsm .p11k keystore.
-mod key_parser;
 mod pin;
+
+use usb_hsm::key_parser;
 
 use std::path::{Path, PathBuf};
 
@@ -147,6 +148,17 @@ fn run(cmd: Commands) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// parse_key_file: read from disk and delegate to the library parser
+// ---------------------------------------------------------------------------
+
+fn parse_key_file(
+    path: &std::path::Path,
+) -> Result<(Vec<key_parser::ParsedKey>, Vec<(String, key_parser::KeyParseError)>), key_parser::KeyParseError> {
+    let data = std::fs::read(path).map_err(key_parser::KeyParseError::Io)?;
+    key_parser::parse_key_bytes(&data, &|p| pin::prompt_passphrase(p), Some(path))
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
@@ -244,7 +256,7 @@ fn cmd_create(
     let mut entries: Vec<KeyEntry> = Vec::new();
     let mut any_failures = false;
     for (idx, path) in key_files.iter().enumerate() {
-        let (parsed_keys, failures) = key_parser::parse_key_file(path)
+        let (parsed_keys, failures) = parse_key_file(path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         for (alias, err) in &failures {
             eprintln!("warning: skipped \"{alias}\": {err}");
@@ -350,7 +362,7 @@ fn cmd_key_add(keystore_path: PathBuf, key_file: PathBuf, label: Option<String>)
     let keystore = Keystore::load(&keystore_path, &pin)
         .map_err(|e| format!("{}: {e}", keystore_path.display()))?;
 
-    let (parsed_keys, failures) = key_parser::parse_key_file(&key_file)
+    let (parsed_keys, failures) = parse_key_file(&key_file)
         .map_err(|e| format!("{}: {e}", key_file.display()))?;
     for (alias, err) in &failures {
         eprintln!("warning: skipped \"{alias}\": {err}");

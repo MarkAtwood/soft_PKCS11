@@ -1,7 +1,7 @@
-/// Private key file parser for usb-hsm-keygen.
+/// Private key parser library for usb-hsm.
 ///
-/// Reads a PEM or DER private key file and returns the key bytes in the
-/// format expected by [`usb_hsm::keystore::KeyEntry`]:
+/// Parses binary key material and returns key bytes in the format expected by
+/// [`crate::keystore::KeyEntry`]:
 ///   - RSA: PKCS#1 DER (the raw `RSAPrivateKey` structure)
 ///   - EC P-256: raw 32-byte big-endian private key scalar
 ///
@@ -11,9 +11,10 @@
 ///   "PRIVATE KEY"      -- PKCS#8 `PrivateKeyInfo`; RSA or EC P-256
 ///
 /// DER files are auto-detected by content rather than extension.
+use std::io;
 use std::path::Path;
 
-use usb_hsm::keystore::KeyType;
+use crate::keystore::KeyType;
 
 // ---------------------------------------------------------------------------
 // GCP service account JSON
@@ -211,15 +212,31 @@ impl From<std::io::Error> for KeyParseError {
 ///
 /// All currently-supported formats are single-key: they return a `keys` Vec
 /// of length 1 and an empty `failures` Vec. Multi-key formats (PKCS#12, JKS)
-/// will use the Vec to return multiple keys from a single file.
-pub fn parse_key_file(path: &Path) -> Result<(Vec<ParsedKey>, Vec<(String, KeyParseError)>), KeyParseError> {
-    let data = std::fs::read(path)?;
+/// use the Vec to return multiple keys from a single input.
+///
+/// `passphrase_fn` is called (at most once per encrypted format) with a prompt
+/// string and must return the passphrase. Callers that do not handle encrypted
+/// keys may pass `|_| Ok(String::new())`. The `path_hint` is used only to
+/// derive a fallback alias/label from the filename stem; pass `None` when
+/// parsing in-memory bytes with no associated path.
+pub fn parse_key_bytes(
+    data: &[u8],
+    passphrase_fn: &dyn Fn(&str) -> io::Result<String>,
+    path_hint: Option<&Path>,
+) -> Result<(Vec<ParsedKey>, Vec<(String, KeyParseError)>), KeyParseError> {
     let id = random_id()?;
+    let stem = || -> String {
+        path_hint
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .unwrap_or("key")
+            .to_string()
+    };
 
     // GCP service account JSON: check before PEM/DER paths since a JSON file
     // starts with '{', not '-----BEGIN', but we want a clear detection path.
-    if let Some(gcp) = detect_gcp_json(&data) {
-        let alias = path.file_stem().and_then(|s| s.to_str()).unwrap_or("key").to_string();
+    if let Some(gcp) = detect_gcp_json(data) {
+        let alias = stem();
 
         let pem_block = pem::parse(gcp.pem.as_bytes())
             .map_err(|e| KeyParseError::Malformed(format!("GCP JSON private_key PEM: {e}")))?;
@@ -248,7 +265,7 @@ pub fn parse_key_file(path: &Path) -> Result<(Vec<ParsedKey>, Vec<(String, KeyPa
         // Key ID: use private_key_id when present and valid (first 32 hex
         // chars -> 16 bytes); fall back to SHA-256(RSAPublicKey DER)[0..16]
         // for reproducibility when private_key_id is absent; last resort is
-        // the random ID generated at the top of parse_key_file.
+        // the random ID generated at the top of parse_key_bytes.
         parsed.id = gcp.key_id_hex
             .as_deref()
             .and_then(gcp_id_from_key_id_hex)
@@ -262,22 +279,21 @@ pub fn parse_key_file(path: &Path) -> Result<(Vec<ParsedKey>, Vec<(String, KeyPa
         return Ok((vec![parsed], vec![]));
     }
 
-    let parsed = if is_pgp_armor(&data) {
-        let binary = dearmor(&data)?;
-        return parse_pgp_binary(&binary);
-    } else if is_pgp_binary_secret_key_packet(&data) {
-        return parse_pgp_binary(&data);
+    let parsed = if is_pgp_armor(data) {
+        let binary = dearmor(data)?;
+        return parse_pgp_binary(&binary, passphrase_fn);
+    } else if is_pgp_binary_secret_key_packet(data) {
+        return parse_pgp_binary(data, passphrase_fn);
     } else if data.starts_with(b"-----BEGIN") {
-        let pem_block = pem::parse(&data)
+        let pem_block = pem::parse(data)
             .map_err(|e| KeyParseError::Malformed(format!("PEM parse error: {e}")))?;
         match pem_block.tag() {
             "RSA PRIVATE KEY" => parse_rsa_pkcs1(pem_block.contents(), id),
             "EC PRIVATE KEY" => parse_ec_sec1(pem_block.contents(), id),
             "PRIVATE KEY" => parse_pkcs8(pem_block.contents(), id),
             "ENCRYPTED PRIVATE KEY" => {
-                let passphrase =
-                    super::pin::prompt_passphrase("Passphrase for encrypted key: ")
-                        .map_err(KeyParseError::Io)?;
+                let passphrase = passphrase_fn("Passphrase for encrypted key: ")
+                    .map_err(KeyParseError::Io)?;
                 parse_encrypted_pkcs8(pem_block.contents(), &passphrase, id)
             }
             "OPENSSH PRIVATE KEY" => {
@@ -288,7 +304,7 @@ pub fn parse_key_file(path: &Path) -> Result<(Vec<ParsedKey>, Vec<(String, KeyPa
                 let passphrase = if frame.ciphername == "none" {
                     String::new()
                 } else {
-                    super::pin::prompt_passphrase("Passphrase for OpenSSH key: ")
+                    passphrase_fn("Passphrase for OpenSSH key: ")
                         .map_err(KeyParseError::Io)?
                 };
 
@@ -302,16 +318,16 @@ pub fn parse_key_file(path: &Path) -> Result<(Vec<ParsedKey>, Vec<(String, KeyPa
                  \"RSA PRIVATE KEY\", \"EC PRIVATE KEY\", or \"PRIVATE KEY\")"
             ))),
         }
-    } else if is_ppk(&data) {
-        return parse_ppk_file_data(&data);
-    } else if is_jks_or_jceks(&data) {
-        return parse_jks_file_data(&data);
-    } else if !data.starts_with(OPENSSH_MAGIC) && is_pfx_der(&data) {
+    } else if is_ppk(data) {
+        return parse_ppk_file_data(data, passphrase_fn);
+    } else if is_jks_or_jceks(data) {
+        return parse_jks_file_data(data, passphrase_fn);
+    } else if !data.starts_with(OPENSSH_MAGIC) && is_pfx_der(data) {
         // PKCS#12 PFX: can contain multiple keys; handled separately.
-        return parse_pfx_file_data(&data);
+        return parse_pfx_file_data(data, passphrase_fn);
     } else {
         // Bare DER: probe for PKCS#8 or PKCS#1 / SEC1 by structure.
-        parse_der_auto(&data, id)
+        parse_der_auto(data, id, passphrase_fn)
     };
 
     match parsed {
@@ -320,12 +336,7 @@ pub fn parse_key_file(path: &Path) -> Result<(Vec<ParsedKey>, Vec<(String, KeyPa
             // For single-key formats a parse error on the one key is treated as
             // a per-entry failure (the outer file structure was readable), not a
             // fatal error. The alias is the filename stem.
-            let alias = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("key")
-                .to_string();
-            Ok((vec![], vec![(alias, e)]))
+            Ok((vec![], vec![(stem(), e)]))
         }
     }
 }
@@ -347,8 +358,9 @@ fn is_pfx_der(der: &[u8]) -> bool {
 /// extracts all ShroudedKeyBags.
 fn parse_pfx_file_data(
     data: &[u8],
+    passphrase_fn: &dyn Fn(&str) -> io::Result<String>,
 ) -> Result<(Vec<ParsedKey>, Vec<(String, KeyParseError)>), KeyParseError> {
-    let passphrase = super::pin::prompt_passphrase("Passphrase for PKCS#12 file: ")
+    let passphrase = passphrase_fn("Passphrase for PKCS#12 file: ")
         .map_err(KeyParseError::Io)?;
     verify_pfx_mac(data, &passphrase)?;
     let bags = parse_pfx_structure(data, &passphrase)?;
@@ -366,8 +378,9 @@ fn parse_pfx_file_data(
 /// so that the caller can report which aliases failed.
 fn parse_jks_file_data(
     data: &[u8],
+    passphrase_fn: &dyn Fn(&str) -> io::Result<String>,
 ) -> Result<(Vec<ParsedKey>, Vec<(String, KeyParseError)>), KeyParseError> {
-    let passphrase = super::pin::prompt_passphrase("Passphrase for JKS/JCEKS keystore: ")
+    let passphrase = passphrase_fn("Passphrase for JKS/JCEKS keystore: ")
         .map_err(KeyParseError::Io)?;
     verify_jks_integrity(data, &passphrase)?;
     let entries = parse_jks_structure(data)?;
@@ -475,14 +488,14 @@ fn parse_pkcs8(der: &[u8], id: [u8; 16]) -> Result<ParsedKey, KeyParseError> {
 /// EncryptedPrivateKeyInfo (RFC 5958) starts with a SEQUENCE
 /// (AlgorithmIdentifier with a PBES OID), not an INTEGER, so it is detected
 /// and dispatched before the version-byte logic.
-fn parse_der_auto(der: &[u8], id: [u8; 16]) -> Result<ParsedKey, KeyParseError> {
+fn parse_der_auto(der: &[u8], id: [u8; 16], passphrase_fn: &dyn Fn(&str) -> io::Result<String>) -> Result<ParsedKey, KeyParseError> {
     // OpenSSH new-format binary file (no PEM wrapper): detect before SEQUENCE check.
     if der.starts_with(OPENSSH_MAGIC) {
         let frame = parse_openssh_binary(der)?;
         let passphrase = if frame.ciphername == "none" {
             String::new()
         } else {
-            super::pin::prompt_passphrase("Passphrase for OpenSSH key: ")
+            passphrase_fn("Passphrase for OpenSSH key: ")
                 .map_err(KeyParseError::Io)?
         };
         let blob = decrypt_openssh_blob(&frame, &passphrase)?;
@@ -509,9 +522,8 @@ fn parse_der_auto(der: &[u8], id: [u8; 16]) -> Result<ParsedKey, KeyParseError> 
                     OID_PKCS12_SHA1_RC2_40,
                 ];
                 if PBES_OIDS.iter().any(|k| *k == oid) {
-                    let passphrase =
-                        super::pin::prompt_passphrase("Passphrase for encrypted key: ")
-                            .map_err(KeyParseError::Io)?;
+                    let passphrase = passphrase_fn("Passphrase for encrypted key: ")
+                        .map_err(KeyParseError::Io)?;
                     return parse_encrypted_pkcs8(der, &passphrase, id);
                 }
             }
@@ -2393,13 +2405,14 @@ pub fn extract_keys_from_pfx_bags(
 /// extracts the private key.
 fn parse_ppk_file_data(
     data: &[u8],
+    passphrase_fn: &dyn Fn(&str) -> io::Result<String>,
 ) -> Result<(Vec<ParsedKey>, Vec<(String, KeyParseError)>), KeyParseError> {
     let ppk = parse_ppk(data)?;
 
     let passphrase = if ppk.encryption == "none" {
         String::new()
     } else {
-        super::pin::prompt_passphrase("Passphrase for PPK key: ")
+        passphrase_fn("Passphrase for PPK key: ")
             .map_err(KeyParseError::Io)?
     };
 
@@ -3353,6 +3366,7 @@ pub fn is_pgp_binary_secret_key_packet(data: &[u8]) -> bool {
 /// User-ID packet in the stream.
 fn parse_pgp_binary(
     data: &[u8],
+    passphrase_fn: &dyn Fn(&str) -> io::Result<String>,
 ) -> Result<(Vec<ParsedKey>, Vec<(String, KeyParseError)>), KeyParseError> {
     let packets = pgp_collect_secret_packets(data);
     if packets.is_empty() {
@@ -3371,7 +3385,7 @@ fn parse_pgp_binary(
         }
     });
     let passphrase_str = if needs_passphrase {
-        super::pin::prompt_passphrase("Passphrase for OpenPGP key: ")?
+        passphrase_fn("Passphrase for OpenPGP key: ").map_err(KeyParseError::Io)?
     } else {
         String::new()
     };
