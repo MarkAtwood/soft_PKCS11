@@ -996,10 +996,20 @@ unsafe extern "C" fn c_login(
         return CKR_USER_TYPE_INVALID;
     }
     // h_session identifies which token to log into.
-    // h_session == 0 (CK_INVALID_HANDLE) is accepted as a backward-compatible
-    // slot-0 shortcut: callers that pre-date multi-slot support pass 0 here
-    // because the session handle was ignored in the single-slot era.
-    // Any non-zero handle must be present in op_state; 0 goes directly to slot 0.
+    //
+    // h_session == 0 (CK_INVALID_HANDLE) is accepted as a slot-0 shortcut.
+    // Firefox NSS calls C_Login without guarding against slot->session being
+    // CK_INVALID_HANDLE in two code paths:
+    //   - PK11_CheckUserPassword (lib/pk11wrap/pk11auth.c): calls C_Logout then
+    //     C_Login on slot->session without an INVALID_HANDLE check.
+    //   - PK11_InitPin (lib/pk11wrap/pk11auth.c): silently ignores the return
+    //     value of PK11_InitToken; if C_OpenSession failed inside that call,
+    //     slot->session is still 0 when C_Login is reached.
+    //
+    // OpenSSH (ssh-pkcs11.c) and pkcs11-tool (OpenSC) never pass h_session=0:
+    // both call C_OpenSession first and only proceed to C_Login on success.
+    //
+    // Any non-zero handle must be present in op_state; 0 goes to slot 0.
     let slot_id: CK_SLOT_ID = if h_session == 0 {
         0
     } else {
