@@ -20,18 +20,18 @@ cryptoki-sys = "0.5"
 # Crypto primitives -- wolfCrypt Rust wrapper.
 #
 # LOCAL PATH DEPENDENCY: wolfcrypt is not published to crates.io. This crate must
-# be checked out relative to usb-hsm as:
+# be checked out adjacent to this repo:
 #
 #   <parent>/
-#     usb-hsm/          <- this crate
+#     soft_PKCS11/      <- this repo
 #     wolfssl-rs/
 #       wolfcrypt/      <- wolfcrypt crate root
 #
-# To build usb-hsm standalone, clone the wolfssl-rs workspace adjacent to this
-# directory. If wolfcrypt is later published to crates.io, replace the path
+# Clone wolfssl-rs into the same parent directory before building.
+# If wolfcrypt is later published to crates.io, replace the path
 # dependency with a versioned dep and remove this comment.
 # (Risk tracked: soft_PKCS11-z4e)
-wolfcrypt = { path = "../../wolfssl-rs/wolfcrypt", features = ["aead", "pbkdf2", "rsa", "ecdsa", "ecc", "mldsa", "mlkem", "cipher", "des3", "kdf", "rsa-direct"] }
+wolfcrypt = { path = "../wolfssl-rs/wolfcrypt", features = ["aead", "pbkdf2", "rsa", "ecdsa", "ecc", "mldsa", "mlkem", "cipher", "des3", "kdf", "rsa-direct"] }
 
 # AEAD traits (needed to call KeyInit/AeadInPlace on wolfcrypt types)
 aead = "0.5"
@@ -149,7 +149,7 @@ assert_cmd = "2"
 hex = "0.4"
 serde_json = "1"
 # PQC key generation for integration tests.
-wolfcrypt = { path = "../../wolfssl-rs/wolfcrypt", features = ["mldsa", "mlkem"] }
+wolfcrypt = { path = "../wolfssl-rs/wolfcrypt", features = ["mldsa", "mlkem"] }
 signature = "2.2"
 
 [build-dependencies]

@@ -360,12 +360,12 @@ interactively.
 
 `usb-hsm` does not emit its own audit log. Use system-level logging:
 
-| Application | Where to look |
-|---|---|
-| OpenSSH | `/var/log/auth.log` or `journalctl -u ssh` |
-| PAM (`pam_pkcs11`) | syslog / `journalctl` |
-| Any systemd service | `journalctl -u <service>` |
-| Firefox / Chrome | Browser console or OS keychain log |
+| Application          | Where to look                                       |
+|----------------------|-----------------------------------------------------|
+| OpenSSH              | `/var/log/auth.log` or `journalctl -u ssh`          |
+| PAM (`pam_pkcs11`)   | syslog / `journalctl`                               |
+| Any systemd service  | `journalctl -u <service>`                           |
+| Firefox / Chrome     | Browser console or OS keychain log                  |
 
 For per-operation audit (every `C_Sign` call), configure logging in the
 application using the token, not in the token itself.

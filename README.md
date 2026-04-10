@@ -30,14 +30,14 @@ and all key material is immediately zeroized.
 
 ## Supported mechanisms
 
-| Mechanism | Sign | Verify | Encrypt | Decrypt |
-|---|---|---|---|---|
-| `CKM_RSA_PKCS_PSS` | y | y | | |
-| `CKM_RSA_PKCS_OAEP` | | | y | y |
-| `CKM_ECDSA` (pre-hashed) | y | y | | |
-| `CKM_ECDSA_SHA256` | y | y | | |
-| `CKM_ML_DSA` (pure ML-DSA.Sign, §5.3) | y | y | | |
-| `CKM_ML_KEM` | | | y | y |
+| Mechanism                              | Sign | Verify | Encrypt | Decrypt |
+|----------------------------------------|------|--------|---------|---------|
+| `CKM_RSA_PKCS_PSS`                     | y    | y      |         |         |
+| `CKM_RSA_PKCS_OAEP`                    |      |        | y       | y       |
+| `CKM_ECDSA` (pre-hashed)              | y    | y      |         |         |
+| `CKM_ECDSA_SHA256`                     | y    | y      |         |         |
+| `CKM_ML_DSA` (pure ML-DSA.Sign, §5.3) | y    | y      |         |         |
+| `CKM_ML_KEM`                           |      |        | y       | y       |
 
 RSA keys: PKCS#1 DER format. EC keys: P-256, raw 32-byte private scalar.
 ECDSA signatures are raw r||s per PKCS#11 s.2.3.1 (64 bytes for P-256).
@@ -49,13 +49,13 @@ shared\_secret (1120 bytes); `C_Decrypt` returns the 32-byte shared secret.
 
 ## Threat model
 
-| Threat | Protected? |
-|---|---|
-| Stolen laptop (USB drive absent) | Yes -- no keys on disk |
-| Stolen USB drive (PIN unknown) | Yes -- AES-256-GCM + PBKDF2 |
-| Physical theft of both laptop and USB | PIN required to decrypt |
-| Root-level memory attack on running machine | No -- keys are in RAM |
-| Multiple USB drives with `.p11k` files | First found wins (use udev rules to restrict) |
+| Threat                                        | Protected?                                        |
+|-----------------------------------------------|---------------------------------------------------|
+| Stolen laptop (USB drive absent)              | Yes -- no keys on disk                            |
+| Stolen USB drive (PIN unknown)                | Yes -- AES-256-GCM + PBKDF2                       |
+| Physical theft of both laptop and USB         | PIN required to decrypt                           |
+| Root-level memory attack on running machine   | No -- keys are in RAM                             |
+| Multiple USB drives with `.p11k` files        | First found wins (use udev rules to restrict)     |
 
 ---
 
@@ -210,6 +210,21 @@ the PIN.
 
 ---
 
+## PKCS#11 conformance notes
+
+- **One slot, slot ID 0.** The token is always in slot 0.
+- **No Security Officer role.** `C_Login(CKU_SO)` returns
+  `CKR_USER_TYPE_INVALID`. This is a user-PIN-only token.
+- **Minimum PIN length: 6 characters** (`ulMinPinLen = 6` per NIST guidance).
+- **ECDSA signatures** are raw r||s per PKCS#11 s.2.3.1: 32 bytes r followed
+  by 32 bytes s for P-256 (64 bytes total). Not DER-encoded.
+- **USB detection timing.** udev emits block device events before the
+  automounter (udisks2) completes the mount. The library retries
+  `/proc/mounts` every 100 ms for up to 10 seconds after a block device
+  event, so there is no configuration required for standard udisks2 setups.
+
+---
+
 ## Integrating with p11-kit
 
 Add the module to `/etc/pkcs11/modules/usb-hsm.module`:
@@ -241,21 +256,6 @@ Or pass directly:
 ```bash
 ssh -I /usr/local/lib/libusb_hsm.so user@host
 ```
-
----
-
-## PKCS#11 conformance notes
-
-- **One slot, slot ID 0.** The token is always in slot 0.
-- **No Security Officer role.** `C_Login(CKU_SO)` returns
-  `CKR_USER_TYPE_INVALID`. This is a user-PIN-only token.
-- **Minimum PIN length: 6 characters** (`ulMinPinLen = 6` per NIST guidance).
-- **ECDSA signatures** are raw r||s per PKCS#11 s.2.3.1: 32 bytes r followed
-  by 32 bytes s for P-256 (64 bytes total). Not DER-encoded.
-- **USB detection timing.** udev emits block device events before the
-  automounter (udisks2) completes the mount. The library retries
-  `/proc/mounts` every 100 ms for up to 10 seconds after a block device
-  event, so there is no configuration required for standard udisks2 setups.
 
 ---
 
@@ -328,18 +328,18 @@ without a format version bump.
 `usb-hsm-keygen` auto-detects the following formats and normalizes them to
 the same internal `KeyEntry` representation:
 
-| Format | Detected by |
-|---|---|
-| PEM (`RSA PRIVATE KEY`, `EC PRIVATE KEY`, `PRIVATE KEY`) | PEM header |
-| Bare DER (PKCS#1 RSA, SEC1 EC, PKCS#8 unencrypted) | ASN.1 structure |
-| PKCS#8 encrypted (PBES2: PBKDF2-SHA1/SHA256 + AES-CBC) | `-----BEGIN ENCRYPTED PRIVATE KEY-----` / OID |
-| PKCS#12 (`.pfx` / `.p12`, multi-key) | ASN.1 SEQUENCE + PKCS#12 OID |
-| OpenSSH new-format (passphrase-protected or unencrypted) | `-----BEGIN OPENSSH PRIVATE KEY-----` |
-| OpenSSH binary private key | `openssh-key-v1\0` magic |
-| OpenPGP armored / binary secret key | PEM header / packet tag |
-| PuTTY PPK v2 / v3 | `PuTTY-User-Key-File-` prefix |
-| JKS / JCEKS Java KeyStore | `FEEDFEED` / `CECECECE` magic |
-| GCP Service Account JSON | JSON object with `private_key` field |
+| Format                                                    | Detected by                                             |
+|-----------------------------------------------------------|---------------------------------------------------------|
+| PEM (`RSA PRIVATE KEY`, `EC PRIVATE KEY`, `PRIVATE KEY`)  | PEM header                                              |
+| Bare DER (PKCS#1 RSA, SEC1 EC, PKCS#8 unencrypted)       | ASN.1 structure                                         |
+| PKCS#8 encrypted (PBES2: PBKDF2-SHA1/SHA256 + AES-CBC)   | `-----BEGIN ENCRYPTED PRIVATE KEY-----` / OID           |
+| PKCS#12 (`.pfx` / `.p12`, multi-key)                     | ASN.1 SEQUENCE + PKCS#12 OID                            |
+| OpenSSH new-format (passphrase-protected or unencrypted)  | `-----BEGIN OPENSSH PRIVATE KEY-----`                   |
+| OpenSSH binary private key                               | `openssh-key-v1\0` magic                                |
+| OpenPGP armored / binary secret key                      | PEM header / packet tag                                 |
+| PuTTY PPK v2 / v3                                        | `PuTTY-User-Key-File-` prefix                           |
+| JKS / JCEKS Java KeyStore                                | `FEEDFEED` / `CECECECE` magic                           |
+| GCP Service Account JSON                                 | JSON object with `private_key` field                    |
 
 ### Key types
 

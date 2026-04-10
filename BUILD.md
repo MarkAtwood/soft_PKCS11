@@ -166,7 +166,7 @@ Create this exact layout. Do not create any files not listed here unless they
 are generated artifacts (target/, *.lock).
 
 ```
-usb-hsm/
+soft_PKCS11/           # repo root
 +-- Cargo.toml
 +-- build.rs
 +-- src/
@@ -206,7 +206,7 @@ cryptoki = "0.7"
 # Path points to the wolfssl-rs workspace sibling; adjust if the repo is elsewhere.
 # wolfcrypt provides: Aes256Gcm, pbkdf2_hmac_sha256, RsaPrivateKey, RsaPublicKey,
 # P256SigningKey, P256VerifyingKey, WolfRng -- all backed by wolfSSL C library.
-wolfcrypt = { path = "../../wolfssl-rs/wolfcrypt" }
+wolfcrypt = { path = "../wolfssl-rs/wolfcrypt" }
 
 # Key material safety -- wolfcrypt key types implement ZeroizeOnDrop internally,
 # but we still use zeroize directly for intermediate buffers we own.
@@ -375,25 +375,23 @@ new format.
 **Format detection table** (implement the dispatch table even if only the
 first row is wired up):
 
-```
-Header bytes / pattern                           Format
-------------------------------------------------------------------------
-50 31 31 4B ("P11K")                             .p11k native (v1, current)
-30 82 ... (ASN.1 SEQUENCE + try PKCS#12 OID)     PKCS#12 (.pfx/.p12) -- future
-30 82 ... (ASN.1 SEQUENCE + PKCS#8 OID)          Raw DER PKCS#8 (encrypted or not) -- future
-"-----BEGIN ENCRYPTED PRIVATE KEY-----"          PKCS#8 EncryptedPrivateKeyInfo PEM -- future
-"-----BEGIN PRIVATE KEY-----"                    PKCS#8 unencrypted PEM -- future
-"-----BEGIN RSA PRIVATE KEY-----"                Traditional OpenSSL RSA PEM (PKCS#1) -- future
-"-----BEGIN EC PRIVATE KEY-----"                 Traditional OpenSSL EC PEM (SEC1) -- future
-"-----BEGIN OPENSSH PRIVATE KEY-----"            OpenSSH new-format private key -- future
-6F 70 65 6E 73 73 68 2D 6B 65 79 2D 76 31 00   OpenSSH binary private key -- future
-"-----BEGIN PGP PRIVATE KEY BLOCK-----"          OpenPGP armored secret key -- future
-C5 xx / C7 xx (OpenPGP secret key packet tag)   OpenPGP binary secret key -- future
-"PuTTY-User-Key-File-2:" / "-3:"                PuTTY PPK v2/v3 -- future
-FE ED FE ED (big-endian u32)                     JKS Java KeyStore -- future
-CE CE CE CE (big-endian u32)                     JCEKS Java KeyStore -- future
-7B 22 ... "private_key" (JSON object)            GCP Service Account JSON -- future
-```
+| Header bytes / pattern | Format |
+|------------------------------------------------|------------------------------------------------|
+| `50 31 31 4B` ("P11K") | .p11k native (v1, current) |
+| `30 82 ...` (ASN.1 SEQUENCE + try PKCS#12 OID) | PKCS#12 (.pfx/.p12) -- future |
+| `30 82 ...` (ASN.1 SEQUENCE + PKCS#8 OID) | Raw DER PKCS#8 (encrypted or not) -- future |
+| `-----BEGIN ENCRYPTED PRIVATE KEY-----` | PKCS#8 EncryptedPrivateKeyInfo PEM -- future |
+| `-----BEGIN PRIVATE KEY-----` | PKCS#8 unencrypted PEM -- future |
+| `-----BEGIN RSA PRIVATE KEY-----` | Traditional OpenSSL RSA PEM (PKCS#1) -- future |
+| `-----BEGIN EC PRIVATE KEY-----` | Traditional OpenSSL EC PEM (SEC1) -- future |
+| `-----BEGIN OPENSSH PRIVATE KEY-----` | OpenSSH new-format private key -- future |
+| `6F 70 65 6E 73 73 68 2D 6B 65 79 2D 76 31 00` | OpenSSH binary private key -- future |
+| `-----BEGIN PGP PRIVATE KEY BLOCK-----` | OpenPGP armored secret key -- future |
+| `C5 xx / C7 xx` (OpenPGP secret key packet tag) | OpenPGP binary secret key -- future |
+| `PuTTY-User-Key-File-2:` / `-3:` | PuTTY PPK v2/v3 -- future |
+| `FE ED FE ED` (big-endian u32) | JKS Java KeyStore -- future |
+| `CE CE CE CE` (big-endian u32) | JCEKS Java KeyStore -- future |
+| `7B 22 ...` with `"private_key"` field (JSON) | GCP Service Account JSON -- future |
 
 Note on ASN.1 disambiguation: both PKCS#12 and DER PKCS#8 start with `0x30`.
 Distinguish them by inspecting the OID in the first SEQUENCE: PKCS#12 uses
@@ -536,13 +534,13 @@ return either `CKR_OK` or `CKR_DEVICE_REMOVED`, never UB.
 
 **Operations to implement:**
 
-| PKCS#11 Mechanism | Underlying primitive |
-|---|---|
-| CKM_RSA_PKCS | RSA PKCS#1 v1.5 sign/verify |
-| CKM_RSA_PKCS_PSS | RSA-PSS sign/verify |
-| CKM_RSA_PKCS_OAEP | RSA-OAEP encrypt/decrypt |
-| CKM_ECDSA | ECDSA P-256 sign/verify (raw r\|\|s) |
-| CKM_ECDSA_SHA256 | ECDSA P-256 with SHA-256 prehash |
+| PKCS#11 Mechanism  | Underlying primitive                  |
+|--------------------|---------------------------------------|
+| CKM_RSA_PKCS       | RSA PKCS#1 v1.5 sign/verify           |
+| CKM_RSA_PKCS_PSS   | RSA-PSS sign/verify                   |
+| CKM_RSA_PKCS_OAEP  | RSA-OAEP encrypt/decrypt              |
+| CKM_ECDSA          | ECDSA P-256 sign/verify (raw r\|\|s)  |
+| CKM_ECDSA_SHA256   | ECDSA P-256 with SHA-256 prehash      |
 
 **Key constraint:** Key bytes must never leave the mlock'd `KeyEntry.der_bytes`
 allocation. Operations borrow it; they do not copy. Use
