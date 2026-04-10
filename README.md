@@ -10,6 +10,25 @@ the keys ever appearing on disk unencrypted.
 
 ---
 
+## This is not a hardware HSM
+
+Yes, the private keys exist in RAM while the token is in use. A determined
+attacker with root access and a memory scraper can get them. That is a known,
+accepted tradeoff.
+
+If your threat model requires tamper-resistant hardware, key material that
+never leaves a secure enclave, and FIPS 140-2/3 certification, you want a
+YubiKey, a Nitrokey, or a real HSM. Those are excellent products and you
+should use them.
+
+This project is for everyone else: people who want PKCS#11-compatible key
+storage that is meaningfully better than a plaintext key file on disk, costs
+nothing beyond a spare USB drive, and works with the same tooling as hardware
+tokens. It is a practical improvement over the alternative most people are
+actually using, not a replacement for hardware security modules.
+
+---
+
 ## Background
 
 In 2003 I had to build a hacked-together workalike of this for a client -- a
