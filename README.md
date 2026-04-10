@@ -239,7 +239,10 @@ the PIN.
 
 ## PKCS#11 conformance notes
 
-- **One slot, slot ID 0.** The token is always in slot 0.
+- **One slot per `.p11k` file.** Each keystore file on the drive gets its own
+  slot, assigned in alphabetical order (first file = slot 0, second = slot 1,
+  etc.). Slot IDs are stable as long as the set of files on the drive does not
+  change.
 - **No Security Officer role.** `C_Login(CKU_SO)` returns
   `CKR_USER_TYPE_INVALID`. This is a user-PIN-only token.
 - **Minimum PIN length: 6 characters** (`ulMinPinLen = 6` per NIST guidance).
