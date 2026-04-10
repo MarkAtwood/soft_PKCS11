@@ -165,6 +165,17 @@ pub struct Keystore {
 
 impl Keystore {
     pub fn load(path: &Path, pin: &[u8]) -> Result<Self, KeystoreError> {
+        // Reject unreasonably large files before allocating.  A legitimate
+        // .p11k keystore is a few hundred KB at most (thousands of keys);
+        // 1 MiB is a generous ceiling that prevents OOM from crafted inputs.
+        const MAX_KEYSTORE_FILE_LEN: u64 = 1 << 20; // 1 MiB
+        let meta = std::fs::metadata(path)?;
+        if meta.len() > MAX_KEYSTORE_FILE_LEN {
+            return Err(KeystoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "keystore file exceeds maximum size limit",
+            )));
+        }
         let data = std::fs::read(path)?;
         match data.get(..4) {
             Some(magic) if magic == MAGIC => load_p11k(&data, pin),

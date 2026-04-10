@@ -42,7 +42,8 @@ use cryptoki_sys::{
     CKR_FUNCTION_NOT_SUPPORTED, CKR_GENERAL_ERROR,
     CKR_KEY_HANDLE_INVALID, CKR_KEY_TYPE_INCONSISTENT,
     CKR_MECHANISM_INVALID, CKR_MECHANISM_PARAM_INVALID, CKR_OK,
-    CKR_OPERATION_ACTIVE, CKR_OPERATION_NOT_INITIALIZED, CKR_SESSION_HANDLE_INVALID,
+    CKR_OPERATION_ACTIVE, CKR_OPERATION_NOT_INITIALIZED, CKR_PIN_LEN_RANGE,
+    CKR_SESSION_HANDLE_INVALID,
     CKR_SLOT_ID_INVALID, CKR_TEMPLATE_INCONSISTENT, CKR_TOKEN_NOT_PRESENT, CKR_USER_TYPE_INVALID,
     CKS_RO_PUBLIC_SESSION, CKS_RO_USER_FUNCTIONS, CKS_RW_PUBLIC_SESSION, CKS_RW_USER_FUNCTIONS,
     CKU_USER,
@@ -1055,6 +1056,15 @@ unsafe extern "C" fn c_login(
         Some(t) => t,
         None => return CKR_SESSION_HANDLE_INVALID,
     };
+    // Cap PIN length before constructing the slice.  A crafted or buggy caller
+    // passing a very large ul_pin_len (e.g. CK_ULONG::MAX) with a valid pointer
+    // would otherwise create a slice that spans unrelated memory.  256 bytes is
+    // the de-facto maximum for any PIN-based HSM protocol; PKCS#11 s.6.4.1
+    // leaves the maximum to the token's discretion.
+    const MAX_PIN_LEN: CK_ULONG = 256;
+    if ul_pin_len > MAX_PIN_LEN {
+        return CKR_PIN_LEN_RANGE;
+    }
     let pin: &[u8] = if p_pin.is_null() || ul_pin_len == 0 {
         &[]
     } else {
@@ -1087,6 +1097,7 @@ unsafe fn matches_template(
     template: *const CK_ATTRIBUTE,
     count: CK_ULONG,
 ) -> bool {
+    debug_assert!(!template.is_null() || count == 0, "template must be non-null when count > 0");
     for i in 0..count as usize {
         let attr = &*template.add(i);
         if attr.pValue.is_null() || attr.ulValueLen == 0 {
@@ -1158,6 +1169,7 @@ unsafe fn matches_cert_template(
     template: *const CK_ATTRIBUTE,
     count: CK_ULONG,
 ) -> bool {
+    debug_assert!(!template.is_null() || count == 0, "template must be non-null when count > 0");
     for i in 0..count as usize {
         let attr = &*template.add(i);
         if attr.pValue.is_null() || attr.ulValueLen == 0 {
@@ -1199,6 +1211,7 @@ unsafe fn matches_token_pub_template(
     template: *const CK_ATTRIBUTE,
     count: CK_ULONG,
 ) -> bool {
+    debug_assert!(!template.is_null() || count == 0, "template must be non-null when count > 0");
     for i in 0..count as usize {
         let attr = &*template.add(i);
         if attr.pValue.is_null() || attr.ulValueLen == 0 {
@@ -1245,6 +1258,7 @@ unsafe fn matches_session_priv_template(
     template: *const CK_ATTRIBUTE,
     count: CK_ULONG,
 ) -> bool {
+    debug_assert!(!template.is_null() || count == 0, "template must be non-null when count > 0");
     for i in 0..count as usize {
         let attr = &*template.add(i);
         if attr.pValue.is_null() || attr.ulValueLen == 0 {
@@ -1293,6 +1307,7 @@ unsafe fn matches_session_pub_template(
     template: *const CK_ATTRIBUTE,
     count: CK_ULONG,
 ) -> bool {
+    debug_assert!(!template.is_null() || count == 0, "template must be non-null when count > 0");
     for i in 0..count as usize {
         let attr = &*template.add(i);
         if attr.pValue.is_null() || attr.ulValueLen == 0 {

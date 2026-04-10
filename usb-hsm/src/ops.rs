@@ -328,6 +328,13 @@ pub fn decrypt(
             if key_entry.key_type != KeyType::MlKem768 {
                 return Err(OpsError::KeyTypeInconsistent);
             }
+            // FIPS 203 s.6.3: ML-KEM-768 ciphertext is exactly 1088 bytes.
+            // Reject before calling native code; some wolfcrypt builds do not
+            // validate length internally and may read past the buffer end.
+            const ML_KEM_768_CIPHERTEXT_LEN: usize = 1088;
+            if ciphertext.len() != ML_KEM_768_CIPHERTEXT_LEN {
+                return Err(OpsError::DataLenRange);
+            }
             let dk = MlKem768DecapsulationKey::from_private_bytes(&key_entry.der_bytes)
                 .map_err(|e| OpsError::Crypto(format!("{e:?}")))?;
             let ss = dk.decapsulate(ciphertext)

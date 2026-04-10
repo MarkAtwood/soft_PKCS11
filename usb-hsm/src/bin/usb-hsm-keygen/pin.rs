@@ -5,36 +5,38 @@
 /// line is read from stdin -- the caller owns the pipe and is responsible for
 /// not logging it.
 use std::io::{self, IsTerminal, Write};
+use zeroize::Zeroizing;
 
 const MIN_PIN_LEN: usize = 6;
 
 /// Read one PIN: suppress echo if stdin is a TTY, otherwise read a plain line
 /// from stdin.  Prints `prompt` to stderr either way.
-fn read_once(prompt: &str) -> io::Result<String> {
+fn read_once(prompt: &str) -> io::Result<Zeroizing<String>> {
     if io::stdin().is_terminal() {
-        rpassword::prompt_password(prompt)
+        rpassword::prompt_password(prompt).map(Zeroizing::new)
     } else {
         eprint!("{prompt}");
         io::stderr().flush()?;
         // io::stdin() shares one global buffered reader; read_line is safe
         // across multiple calls unlike creating a new BufReader each time.
-        let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        Ok(line.trim_end_matches('\n').trim_end_matches('\r').to_string())
+        let mut line = Zeroizing::new(String::new());
+        io::stdin().read_line(&mut *line)?;
+        Ok(Zeroizing::new(line.trim_end_matches('\n').trim_end_matches('\r').to_string()))
     }
 }
 
 /// Prompt for an existing PIN once.  Used for `key-add`, `key-remove`, and
 /// the old-PIN half of `pin-change` where no confirmation is needed.
-pub fn prompt_pin(prompt: &str) -> io::Result<Vec<u8>> {
-    Ok(read_once(prompt)?.into_bytes())
+pub fn prompt_pin(prompt: &str) -> io::Result<Zeroizing<Vec<u8>>> {
+    Ok(Zeroizing::new(read_once(prompt)?.as_bytes().to_vec()))
 }
 
 /// Prompt for a passphrase for key decryption (e.g. encrypted PKCS#8).
 /// Uses the same TTY-safe behaviour as [`prompt_pin`]: reads from `/dev/tty`
 /// when stdin is a TTY, otherwise from stdin (for scripted/piped use).
 pub fn prompt_passphrase(prompt: &str) -> io::Result<String> {
-    read_once(prompt)
+    let s = read_once(prompt)?;
+    Ok((*s).clone())
 }
 
 /// Prompt for a new PIN, enforce the minimum length, and ask again to
@@ -42,7 +44,7 @@ pub fn prompt_passphrase(prompt: &str) -> io::Result<String> {
 /// Returns the PIN as bytes.
 ///
 /// Used for `create` and the new-PIN half of `pin-change`.
-pub fn prompt_new_pin() -> io::Result<Vec<u8>> {
+pub fn prompt_new_pin() -> io::Result<Zeroizing<Vec<u8>>> {
     loop {
         let pin = read_once("Enter new PIN: ")?;
         if pin.len() < MIN_PIN_LEN {
@@ -52,10 +54,10 @@ pub fn prompt_new_pin() -> io::Result<Vec<u8>> {
             continue;
         }
         let confirm = read_once("Confirm new PIN: ")?;
-        if pin != confirm {
+        if *pin != *confirm {
             eprintln!("PINs do not match. Try again.");
             continue;
         }
-        return Ok(pin.into_bytes());
+        return Ok(Zeroizing::new(pin.as_bytes().to_vec()));
     }
 }
