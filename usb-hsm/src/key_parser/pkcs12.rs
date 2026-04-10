@@ -407,7 +407,7 @@ pub fn verify_pfx_mac(der: &[u8], passphrase: &str) -> Result<(), KeyParseError>
         }
     }
 
-    Err(super::malformed("PFX: MAC verification failed (wrong passphrase?)"))
+    Err(super::malformed("PFX: MAC verification failed (wrong passphrase or corrupted file)"))
 }
 
 /// Parse a PKCS#12 PFX DER blob and return the categorised bags.

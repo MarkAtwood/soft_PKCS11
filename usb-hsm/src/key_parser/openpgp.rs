@@ -672,7 +672,10 @@ pub fn pgp_decrypt_secret_material(
         }
 
         0xFE | 0xFF => {
-            // Encrypted: cipher_id(1) || S2K-type(1) || hash_id(1) || [salt+count] || IV(16) || ciphertext
+            // Encrypted: cipher_id(1) || S2K-type(1) || hash_id(1) || [salt+count] || IV || ciphertext
+            // AES CFB IV is always one AES block (16 bytes) regardless of key length.
+            const PGP_AES_CFB_IV_LEN: usize = 16;
+
             if cur.len() < 3 {
                 return Err(super::malformed(
                     "PGP secret key: truncated before cipher/S2K fields",
@@ -683,10 +686,10 @@ pub fn pgp_decrypt_secret_material(
             let hash_id = cur[2];
             let mut cur = &cur[3..];
 
-            let (key_len, iv_len): (usize, usize) = match cipher_id {
-                7 => (16usize, 16usize),   // AES-128-CFB
-                8 => (24usize, 16usize),   // AES-192-CFB
-                9 => (32usize, 16usize),   // AES-256-CFB
+            let key_len: usize = match cipher_id {
+                7 => 16, // AES-128-CFB
+                8 => 24, // AES-192-CFB
+                9 => 32, // AES-256-CFB
                 other => {
                     return Err(KeyParseError::Unsupported(format!(
                         "PGP: symmetric cipher ID {other} is not supported"
@@ -727,11 +730,11 @@ pub fn pgp_decrypt_secret_material(
                 }
             };
 
-            if cur.len() < iv_len {
+            if cur.len() < PGP_AES_CFB_IV_LEN {
                 return Err(super::malformed("PGP secret key: truncated IV"));
             }
-            let iv: [u8; 16] = cur[..iv_len].try_into().unwrap();
-            cur = &cur[iv_len..];
+            let iv: [u8; PGP_AES_CFB_IV_LEN] = cur[..PGP_AES_CFB_IV_LEN].try_into().unwrap();
+            cur = &cur[PGP_AES_CFB_IV_LEN..];
 
             let key = pgp_s2k_derive_key(passphrase, s2k_type, hash_id, salt, count, key_len)?;
 

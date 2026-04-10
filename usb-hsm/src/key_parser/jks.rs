@@ -28,6 +28,10 @@ pub struct JksPrivateKeyEntry {
 /// All entries collected from a JKS or JCEKS keystore.
 pub struct JksKeystoreEntries {
     pub private_key_entries: Vec<JksPrivateKeyEntry>,
+    /// Aliases of SecretKeyEntry records that were skipped (symmetric keys;
+    /// cannot be imported as PKCS#11 private keys).  Non-empty only in JCEKS
+    /// files.  Reported as per-alias Unsupported failures by the caller.
+    pub skipped_secret_key_aliases: Vec<String>,
 }
 
 /// A big-endian byte cursor for reading Java `DataOutputStream` encoded data.
@@ -154,6 +158,7 @@ pub fn parse_jks_structure(data: &[u8]) -> Result<JksKeystoreEntries, KeyParseEr
     // Sealed object (JCEKS SecretKeyEntry) is at most a few KB in practice; cap at 64 KB.
     const MAX_JCEKS_SECRET_BLOB: usize = 65_536;
     let mut private_key_entries = Vec::new();
+    let mut skipped_secret_key_aliases = Vec::new();
 
     for _ in 0..entry_count {
         let tag = cur.read_u32()?;
@@ -201,8 +206,9 @@ pub fn parse_jks_structure(data: &[u8]) -> Result<JksKeystoreEntries, KeyParseEr
             3 if is_jceks => {
                 // SecretKeyEntry (JCEKS only): sealed object wrapping a symmetric key.
                 // Symmetric keys cannot be imported as PKCS#11 private key entries.
-                // Consume the blob to keep the parse cursor valid, then skip.
+                // Consume the blob to keep the parse cursor valid, then record and skip.
                 let _sealed = cur.read_len32_bounded(MAX_JCEKS_SECRET_BLOB)?;
+                skipped_secret_key_aliases.push(alias);
                 continue;
             }
             _ => {
@@ -214,7 +220,7 @@ pub fn parse_jks_structure(data: &[u8]) -> Result<JksKeystoreEntries, KeyParseEr
         }
     }
 
-    Ok(JksKeystoreEntries { private_key_entries })
+    Ok(JksKeystoreEntries { private_key_entries, skipped_secret_key_aliases })
 }
 
 /// Verify the SHA-1 integrity fingerprint at the end of a JKS or JCEKS file.

@@ -417,13 +417,22 @@ fn parse_jks_file_data(
         .map_err(KeyParseError::Io)?;
     verify_jks_integrity(data, &passphrase)?;
     let entries = parse_jks_structure(data)?;
-    if entries.private_key_entries.is_empty() {
+    let mut parsed_keys = Vec::new();
+    let mut failures: Vec<(String, KeyParseError)> = Vec::new();
+    // Report each skipped SecretKeyEntry as an Unsupported failure so the caller
+    // can warn the user that symmetric keys cannot be imported as PKCS#11 private
+    // keys.  This is distinct from a corrupt file (which returns Err).
+    for alias in entries.skipped_secret_key_aliases {
+        failures.push((alias.clone(), KeyParseError::Unsupported(format!(
+            "JKS: alias \"{alias}\" is a JCEKS SecretKeyEntry (symmetric key); \
+             only PrivateKeyEntry (tag 1) entries can be imported"
+        ))));
+    }
+    if entries.private_key_entries.is_empty() && failures.is_empty() {
         return Err(KeyParseError::Unsupported(
             "JKS/JCEKS: no private key entries found".to_string(),
         ));
     }
-    let mut parsed_keys = Vec::new();
-    let mut failures = Vec::new();
     for entry in entries.private_key_entries {
         let entry_id = random_id()?;
         match jks::decrypt_jks_private_key_entry(&entry.encrypted_key, &passphrase, entry_id) {
@@ -672,6 +681,10 @@ fn malformed(msg: &str) -> KeyParseError {
 /// Constant-time byte-slice equality.  Returns true iff `a == b` with no
 /// early exit on the first differing byte, preventing timing side-channels
 /// in MAC/hash comparisons.
+///
+/// **Always use this function for MAC and hash comparisons.**  Direct `==`
+/// on MAC output is a timing side-channel: it exits on the first differing
+/// byte, leaking the position of the first mismatch to a timing attacker.
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -887,12 +900,18 @@ fn pkcs12_pbe_sha1_3des_decrypt(
 /// Decrypt a JCEKS `PBEWithMD5AndTripleDES` `EncryptedPrivateKeyInfo` and
 /// return the plaintext PKCS#8 DER bytes.
 ///
-/// The OID `1.3.6.1.4.1.42.2.19.1` uses a Sun proprietary KDF:
-/// split the 8-byte salt into two 4-byte halves; if the halves are equal
-/// apply the "buggy inversion" `[a,b,c,d]->[d,a,b,d]`; then iterate
-/// `MD5(prev || password_ascii)` `c` times for each half; concatenate the
-/// two 16-byte outputs to get 24-byte 3DES key + 8-byte IV.
-/// Source: OpenJDK `com.sun.crypto.provider.PBECipherCore`.
+/// The OID `1.3.6.1.4.1.42.2.19.1` uses a Sun proprietary KDF
+/// (`PBES1Core.deriveCipherKey` in OpenJDK):
+///
+/// 1. Split the 8-byte salt into two 4-byte halves.
+/// 2. If the two halves are **equal to each other**, reverse the first half
+///    in place: `[a,b,c,d] → [d,c,b,a]`.  The second half is never modified.
+/// 3. Iterate `MD5(prev || password_ascii)` `c` times starting from each half.
+/// 4. Concatenate the two 16-byte outputs → first 24 bytes = 3DES key, last
+///    8 bytes = IV.
+///
+/// Source: OpenJDK `src/java.base/share/classes/com/sun/crypto/provider/PBES1Core.java`,
+/// method `deriveCipherKey`, the `DESede` branch.
 fn jce_pbe_md5_3des_decrypt(
     alg_params: &[u8],
     passphrase: &str,
@@ -916,18 +935,14 @@ fn jce_pbe_md5_3des_decrypt(
     // Password as ASCII bytes (Java validates non-ASCII; we accept silently).
     let pass_bytes: Vec<u8> = passphrase.bytes().collect();
 
-    // Split salt into two 4-byte halves; apply buggy inversion if equal.
+    // Split salt into two 4-byte halves.
+    // When both halves are identical, reverse the first half in place:
+    // [a,b,c,d] → [d,c,b,a].  The second half is never modified.
+    // (OpenJDK PBES1Core.deriveCipherKey, DESede branch)
     let mut half0: [u8; 4] = salt_bytes[..4].try_into().expect("len checked above");
-    let mut half1: [u8; 4] = salt_bytes[4..].try_into().expect("len checked above");
-    // OpenJDK PBECipherCore: apply per-half inversion when a half consists of
-    // two repeated 2-byte pairs — [A,B,A,B] → [B,A,B,A] is the internal
-    // repetition check; the transformation is [a,b,c,d] → [d,a,b,d].
-    // Applied independently to each half; half1 requires `mut` too.
-    if half0[0] == half0[2] && half0[1] == half0[3] {
-        half0 = [half0[3], half0[0], half0[1], half0[3]];
-    }
-    if half1[0] == half1[2] && half1[1] == half1[3] {
-        half1 = [half1[3], half1[0], half1[1], half1[3]];
+    let half1: [u8; 4] = salt_bytes[4..].try_into().expect("len checked above");
+    if half0 == half1 {
+        half0 = [half0[3], half0[2], half0[1], half0[0]];
     }
 
     // Derive 32 bytes: iterate MD5(prev || password) for each half.
@@ -953,6 +968,40 @@ fn jce_pbe_md5_3des_decrypt(
     iv.copy_from_slice(&block1[8..]);
 
     des3_cbc_decrypt(&key, &iv, ciphertext)
+}
+
+/// Exposed for testing: run the JCEKS MD5+3DES KDF and return `(key_24, iv_8)`.
+///
+/// Uses the same logic as `jce_pbe_md5_3des_decrypt` (inversion + MD5 chain).
+/// Callers pass the raw 8-byte salt, not DER-wrapped params.
+#[cfg(test)]
+pub(crate) fn jce_pbe_kdf_for_test(salt: [u8; 8], passphrase: &str, iters: u32) -> ([u8; 24], [u8; 8]) {
+    let pass_bytes: Vec<u8> = passphrase.bytes().collect();
+    let mut half0: [u8; 4] = salt[..4].try_into().unwrap();
+    let half1: [u8; 4] = salt[4..].try_into().unwrap();
+    if half0 == half1 {
+        half0 = [half0[3], half0[2], half0[1], half0[0]];
+    }
+    let mut block0 = half0.to_vec();
+    let mut block1 = half1.to_vec();
+    for _ in 0..iters {
+        let mut ctx = md5::Context::new();
+        ctx.consume(&block0);
+        ctx.consume(&pass_bytes);
+        block0 = ctx.compute().to_vec();
+    }
+    for _ in 0..iters {
+        let mut ctx = md5::Context::new();
+        ctx.consume(&block1);
+        ctx.consume(&pass_bytes);
+        block1 = ctx.compute().to_vec();
+    }
+    let mut key = [0u8; 24];
+    key[..16].copy_from_slice(&block0);
+    key[16..].copy_from_slice(&block1[..8]);
+    let mut iv = [0u8; 8];
+    iv.copy_from_slice(&block1[8..]);
+    (key, iv)
 }
 
 // OID bytes for PBEWithMD5AndTripleDES (Sun JCEKS): 1.3.6.1.4.1.42.2.19.1

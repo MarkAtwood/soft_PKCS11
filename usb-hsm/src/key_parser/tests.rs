@@ -1235,6 +1235,57 @@
     }
 
     // -----------------------------------------------------------------------
+    // JCEKS PBE KDF unit tests (inversion branch)
+    // -----------------------------------------------------------------------
+    //
+    // Oracle values computed independently with:
+    //   printf '\xHH...' | md5sum
+    // See OpenJDK PBES1Core.java, deriveCipherKey, DESede branch.
+
+    /// When both salt halves are equal, the first half is reversed before KDF.
+    ///
+    /// salt = [01,02,03,04, 01,02,03,04] → halves equal → half0 reversed to
+    /// [04,03,02,01]; half1 unchanged.
+    /// block0 = MD5([04,03,02,01, 74,65,73,74]) = 3a3dc7da5690e2dc17f88054fca1f63d
+    /// block1 = MD5([01,02,03,04, 74,65,73,74]) = cf50353182e4f6eecb8ac4ba19721082
+    #[test]
+    fn jceks_pbe_kdf_inversion_triggers_on_equal_halves() {
+        let salt = [0x01, 0x02, 0x03, 0x04, 0x01, 0x02, 0x03, 0x04];
+        let (key, iv) = jce_pbe_kdf_for_test(salt, "test", 1);
+
+        let expected_block0 = hex::decode("3a3dc7da5690e2dc17f88054fca1f63d").unwrap();
+        let expected_block1 = hex::decode("cf50353182e4f6eecb8ac4ba19721082").unwrap();
+        assert_eq!(&key[..16], expected_block0.as_slice(), "key[0..16] must be block0 after inversion");
+        assert_eq!(&key[16..24], &expected_block1[..8], "key[16..24] must be first 8 bytes of block1");
+        assert_eq!(&iv, &expected_block1[8..16], "IV must be last 8 bytes of block1");
+    }
+
+    /// When salt halves differ, no inversion occurs; half0 is used as-is.
+    ///
+    /// salt = [01,02,03,04, 05,06,07,08] → halves differ → no inversion.
+    /// block0 = MD5([01,02,03,04, 74,65,73,74]) = cf50353182e4f6eecb8ac4ba19721082
+    /// block1 = MD5([05,06,07,08, 74,65,73,74]) = d024c21b1b4d06ef6661f36739baf663
+    #[test]
+    fn jceks_pbe_kdf_no_inversion_on_different_halves() {
+        let salt = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let (key, _iv) = jce_pbe_kdf_for_test(salt, "test", 1);
+
+        let expected_block0 = hex::decode("cf50353182e4f6eecb8ac4ba19721082").unwrap();
+        assert_eq!(&key[..16], expected_block0.as_slice(), "key[0..16] must be block0 without inversion");
+    }
+
+    /// Inversion case produces a different key than no-inversion, proving the
+    /// branch is not a no-op.
+    #[test]
+    fn jceks_pbe_kdf_inversion_changes_key() {
+        let salt_equal = [0x01, 0x02, 0x03, 0x04, 0x01, 0x02, 0x03, 0x04];
+        let salt_differ = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let (key_inv, _) = jce_pbe_kdf_for_test(salt_equal, "test", 1);
+        let (key_noinv, _) = jce_pbe_kdf_for_test(salt_differ, "test", 1);
+        assert_ne!(key_inv, key_noinv, "inversion must change the derived key");
+    }
+
+    // -----------------------------------------------------------------------
     // PPK parser tests
     // -----------------------------------------------------------------------
 

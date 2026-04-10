@@ -660,6 +660,10 @@ unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
         // If CKF_OS_LOCKING_OK is set (with or without callbacks), or if no
         // callbacks are supplied, our internal OS locking satisfies the contract.
     }
+    // Arg validation precedes this check intentionally: a double-init call with
+    // bad args returns CKR_ARGUMENTS_BAD, not CKR_CRYPTOKI_ALREADY_INITIALIZED.
+    // This matches SoftHSM2 behaviour and is defensively correct — we never
+    // touch global state when the caller has supplied invalid arguments.
     if INITIALIZED.swap(true, Ordering::SeqCst) {
         return CKR_CRYPTOKI_ALREADY_INITIALIZED;
     }
