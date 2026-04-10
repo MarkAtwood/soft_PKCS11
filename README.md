@@ -360,6 +360,15 @@ smart card over the PC/SC protocol. This will allow GnuPG's `scdaemon` and
 PIV tooling (e.g. `yubico-piv-tool`, `pivman`) to use the same keys without
 requiring PKCS#11 support in the calling application.
 
+### IronKey support
+
+IronKey hardware-encrypted drives expose a HID unlock interface: the drive
+presents as a HID device when locked and mounts its encrypted partition once
+the correct PIN is accepted. A planned integration will use `hidapi` to
+unlock an IronKey programmatically, then treat the mounted partition as a
+normal usb-hsm keystore location. This stacks the IronKey's hardware-enforced
+PIN lockout on top of usb-hsm's AES-256-GCM layer.
+
 ### Platforms
 
 macOS (IOKit disk arbitration) and Windows (volume arrival notifications)
