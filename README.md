@@ -10,6 +10,14 @@ the keys ever appearing on disk unencrypted.
 
 ---
 
+## Background
+
+In 2003 I had to build a hacked-together workalike of this for a client -- a
+fragile, one-off thing that got the job done but was never the real thing. I
+always meant to come back and do it properly. This is that.
+
+---
+
 ## What it does
 
 `usb-hsm` builds as a shared library (`.so` / `.dylib`) that exposes the
@@ -344,6 +352,13 @@ the same internal `KeyEntry` representation:
 ### Key types
 
 ECC P-384, Ed25519, and X25519 are planned but not in v1.
+
+### Virtual smart card daemon
+
+A companion daemon is planned that presents the USB-backed keys as a virtual
+smart card over the PC/SC protocol. This will allow GnuPG's `scdaemon` and
+PIV tooling (e.g. `yubico-piv-tool`, `pivman`) to use the same keys without
+requiring PKCS#11 support in the calling application.
 
 ### Platforms
 
