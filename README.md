@@ -332,6 +332,35 @@ mlock + zeroize           UsbEvent channel
 
 ---
 
+## Hardware-encrypted USB drives
+
+**Status: untested — should work, needs verification.**
+
+Hardware-encrypted USB flash drives like [Kingston IronKey Keypad 200](https://www.kingston.com/unitedstates/flash/ikkp200),
+[Apricorn Aegis Secure Key 3](https://www.apricorn.com/aegis-secure-key-3), and
+[iStorage datAshur PRO²](https://istorage-uk.com/product/datashur-pro2/) have a
+physical PIN pad on the device. You enter the PIN on the hardware keypad; the
+drive then mounts as normal USB block storage.
+
+usb-hsm should work on these drives with no changes. Once the hardware PIN
+unlocks the drive and the OS mounts it, usb-hsm sees a `.p11k` file on a
+mounted filesystem — the same as any other USB drive. If this works, the
+combined stack gives you:
+
+- **Hardware PIN entry** — no keylogger can capture it
+- **Hardware AES encryption at rest** — the drive itself is FIPS 140-3 Level 3
+- **Software PQC PKCS#11** — ML-DSA-65 and ML-KEM-768 via wolfCrypt
+- **Two independent encryption layers** — hardware AES on the drive + software AES-256-GCM in `.p11k`
+
+This is a meaningful security posture for ~$100: hardware tamper resistance
+from the drive, plus post-quantum crypto operations that no hardware token
+offers today.
+
+**TODO:** Acquire an IronKey Keypad 200 or Apricorn Aegis and verify:
+udev hotplug detection, `.p11k` read/write, full PKCS#11 sign/verify flow.
+
+---
+
 ## Post-quantum cryptography
 
 ML-DSA-65 (`CKM_ML_DSA`, FIPS 204 §5.3 ML-DSA.Sign) and ML-KEM-768 (`CKM_ML_KEM`)
